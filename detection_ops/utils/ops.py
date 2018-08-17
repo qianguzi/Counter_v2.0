@@ -20,11 +20,8 @@ import six
 
 import tensorflow as tf
 
-from object_detection.core import box_list
-from object_detection.core import box_list_ops
-from object_detection.core import standard_fields as fields
-from object_detection.utils import shape_utils
-from object_detection.utils import static_shape
+from detection_ops.utils import shape_utils
+from detection_ops.utils import static_shape
 
 
 def expanded_shape(orig_shape, start_dim, num_dims):
@@ -47,34 +44,6 @@ def expanded_shape(orig_shape, start_dim, num_dims):
     after = tf.slice(orig_shape, start_dim, [-1])
     new_shape = tf.concat([before, add_shape, after], 0)
     return new_shape
-
-
-def normalized_to_image_coordinates(normalized_boxes, image_shape,
-                                    parallel_iterations=32):
-  """Converts a batch of boxes from normal to image coordinates.
-
-  Args:
-    normalized_boxes: a float32 tensor of shape [None, num_boxes, 4] in
-      normalized coordinates.
-    image_shape: a float32 tensor of shape [4] containing the image shape.
-    parallel_iterations: parallelism for the map_fn op.
-
-  Returns:
-    absolute_boxes: a float32 tensor of shape [None, num_boxes, 4] containg the
-      boxes in image coordinates.
-  """
-  def _to_absolute_coordinates(normalized_boxes):
-    return box_list_ops.to_absolute_coordinates(
-        box_list.BoxList(normalized_boxes),
-        image_shape[1], image_shape[2], check_range=False).get()
-
-  absolute_boxes = shape_utils.static_or_dynamic_map_fn(
-      _to_absolute_coordinates,
-      elems=(normalized_boxes),
-      dtype=tf.float32,
-      parallel_iterations=parallel_iterations,
-      back_prop=True)
-  return absolute_boxes
 
 
 def meshgrid(x, y):
@@ -310,155 +279,6 @@ def indices_to_dense_vector(indices,
 def reduce_sum_trailing_dimensions(tensor, ndims):
   """Computes sum across all dimensions following first `ndims` dimensions."""
   return tf.reduce_sum(tensor, axis=tuple(range(ndims, tensor.shape.ndims)))
-
-
-def retain_groundtruth(tensor_dict, valid_indices):
-  """Retains groundtruth by valid indices.
-
-  Args:
-    tensor_dict: a dictionary of following groundtruth tensors -
-      fields.InputDataFields.groundtruth_boxes
-      fields.InputDataFields.groundtruth_classes
-      fields.InputDataFields.groundtruth_keypoints
-      fields.InputDataFields.groundtruth_instance_masks
-      fields.InputDataFields.groundtruth_is_crowd
-      fields.InputDataFields.groundtruth_area
-      fields.InputDataFields.groundtruth_label_types
-      fields.InputDataFields.groundtruth_difficult
-    valid_indices: a tensor with valid indices for the box-level groundtruth.
-
-  Returns:
-    a dictionary of tensors containing only the groundtruth for valid_indices.
-
-  Raises:
-    ValueError: If the shape of valid_indices is invalid.
-    ValueError: field fields.InputDataFields.groundtruth_boxes is
-      not present in tensor_dict.
-  """
-  input_shape = valid_indices.get_shape().as_list()
-  if not (len(input_shape) == 1 or
-          (len(input_shape) == 2 and input_shape[1] == 1)):
-    raise ValueError('The shape of valid_indices is invalid.')
-  valid_indices = tf.reshape(valid_indices, [-1])
-  valid_dict = {}
-  if fields.InputDataFields.groundtruth_boxes in tensor_dict:
-    # Prevents reshape failure when num_boxes is 0.
-    num_boxes = tf.maximum(tf.shape(
-        tensor_dict[fields.InputDataFields.groundtruth_boxes])[0], 1)
-    for key in tensor_dict:
-      if key in [fields.InputDataFields.groundtruth_boxes,
-                 fields.InputDataFields.groundtruth_classes,
-                 fields.InputDataFields.groundtruth_keypoints,
-                 fields.InputDataFields.groundtruth_instance_masks]:
-        valid_dict[key] = tf.gather(tensor_dict[key], valid_indices)
-      # Input decoder returns empty tensor when these fields are not provided.
-      # Needs to reshape into [num_boxes, -1] for tf.gather() to work.
-      elif key in [fields.InputDataFields.groundtruth_is_crowd,
-                   fields.InputDataFields.groundtruth_area,
-                   fields.InputDataFields.groundtruth_difficult,
-                   fields.InputDataFields.groundtruth_label_types]:
-        valid_dict[key] = tf.reshape(
-            tf.gather(tf.reshape(tensor_dict[key], [num_boxes, -1]),
-                      valid_indices), [-1])
-      # Fields that are not associated with boxes.
-      else:
-        valid_dict[key] = tensor_dict[key]
-  else:
-    raise ValueError('%s not present in input tensor dict.' % (
-        fields.InputDataFields.groundtruth_boxes))
-  return valid_dict
-
-
-def retain_groundtruth_with_positive_classes(tensor_dict):
-  """Retains only groundtruth with positive class ids.
-
-  Args:
-    tensor_dict: a dictionary of following groundtruth tensors -
-      fields.InputDataFields.groundtruth_boxes
-      fields.InputDataFields.groundtruth_classes
-      fields.InputDataFields.groundtruth_keypoints
-      fields.InputDataFields.groundtruth_instance_masks
-      fields.InputDataFields.groundtruth_is_crowd
-      fields.InputDataFields.groundtruth_area
-      fields.InputDataFields.groundtruth_label_types
-      fields.InputDataFields.groundtruth_difficult
-
-  Returns:
-    a dictionary of tensors containing only the groundtruth with positive
-    classes.
-
-  Raises:
-    ValueError: If groundtruth_classes tensor is not in tensor_dict.
-  """
-  if fields.InputDataFields.groundtruth_classes not in tensor_dict:
-    raise ValueError('`groundtruth classes` not in tensor_dict.')
-  keep_indices = tf.where(tf.greater(
-      tensor_dict[fields.InputDataFields.groundtruth_classes], 0))
-  return retain_groundtruth(tensor_dict, keep_indices)
-
-
-def replace_nan_groundtruth_label_scores_with_ones(label_scores):
-  """Replaces nan label scores with 1.0.
-
-  Args:
-    label_scores: a tensor containing object annoation label scores.
-
-  Returns:
-    a tensor where NaN label scores have been replaced by ones.
-  """
-  return tf.where(
-      tf.is_nan(label_scores), tf.ones(tf.shape(label_scores)), label_scores)
-
-
-def filter_groundtruth_with_crowd_boxes(tensor_dict):
-  """Filters out groundtruth with boxes corresponding to crowd.
-
-  Args:
-    tensor_dict: a dictionary of following groundtruth tensors -
-      fields.InputDataFields.groundtruth_boxes
-      fields.InputDataFields.groundtruth_classes
-      fields.InputDataFields.groundtruth_keypoints
-      fields.InputDataFields.groundtruth_instance_masks
-      fields.InputDataFields.groundtruth_is_crowd
-      fields.InputDataFields.groundtruth_area
-      fields.InputDataFields.groundtruth_label_types
-
-  Returns:
-    a dictionary of tensors containing only the groundtruth that have bounding
-    boxes.
-  """
-  if fields.InputDataFields.groundtruth_is_crowd in tensor_dict:
-    is_crowd = tensor_dict[fields.InputDataFields.groundtruth_is_crowd]
-    is_not_crowd = tf.logical_not(is_crowd)
-    is_not_crowd_indices = tf.where(is_not_crowd)
-    tensor_dict = retain_groundtruth(tensor_dict, is_not_crowd_indices)
-  return tensor_dict
-
-
-def filter_groundtruth_with_nan_box_coordinates(tensor_dict):
-  """Filters out groundtruth with no bounding boxes.
-
-  Args:
-    tensor_dict: a dictionary of following groundtruth tensors -
-      fields.InputDataFields.groundtruth_boxes
-      fields.InputDataFields.groundtruth_classes
-      fields.InputDataFields.groundtruth_keypoints
-      fields.InputDataFields.groundtruth_instance_masks
-      fields.InputDataFields.groundtruth_is_crowd
-      fields.InputDataFields.groundtruth_area
-      fields.InputDataFields.groundtruth_label_types
-
-  Returns:
-    a dictionary of tensors containing only the groundtruth that have bounding
-    boxes.
-  """
-  groundtruth_boxes = tensor_dict[fields.InputDataFields.groundtruth_boxes]
-  nan_indicator_vector = tf.greater(tf.reduce_sum(tf.to_int32(
-      tf.is_nan(groundtruth_boxes)), reduction_indices=[1]), 0)
-  valid_indicator_vector = tf.logical_not(nan_indicator_vector)
-  valid_indices = tf.where(valid_indicator_vector)
-
-  return retain_groundtruth(tensor_dict, valid_indices)
 
 
 def normalize_to_target(inputs,

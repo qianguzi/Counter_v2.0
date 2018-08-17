@@ -1,9 +1,14 @@
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
+import matplotlib; matplotlib.use('Agg')  # pylint: disable=multiple-statements
+import matplotlib.pyplot as plt  # pylint: disable=g-import-not-at-top
+import numpy as np
 
 from mobilenet import mobilenet_v2
-from detection_ops.utils import shape_utils
-from detection_ops import feature_map_generator, box_predictor
+from detection_ops.utils import shape_utils, visualization_utils
+from detection_ops.utils.visualization_utils import add_cdf_image_summary
+
+from detection_ops import feature_map_generator, box_predictor, anchor_generator, argmax_matcher, target_assigner
 from detection_ops.losses import Loss, WeightedSmoothL1LocalizationLoss, WeightedSoftmaxClassificationLoss
 
 tf.app.flags.DEFINE_string('master', '', 'Session master')
@@ -31,6 +36,9 @@ tf.app.flags.DEFINE_bool('freeze_batchnorm', True,
 tf.app.flags.DEFINE_bool('inplace_batchnorm_update', True,
                      'Whether to update batch norm moving average values inplace')
 tf.app.flags.DEFINE_bool('is_training', True, 'train or eval')
+tf.app.flags.DEFINE_bool('add_summaries', True, 'add summaries')
+tf.app.flags.DEFINE_bool('normalize_loss_by_num_matches', True, 'normalize loss by num of matches')
+tf.app.flags.DEFINE_bool('normalize_loc_loss_by_codesize', True, 'normalize loc loss by codesize')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -52,30 +60,82 @@ def _conv_hyperparams_fn():
                     weights_regularizer=slim.l2_regularizer(scale=1.0)) as s:
     return s
 
-
 def reduce_sum_trailing_dimensions(tensor, ndims):
   """Computes sum across all dimensions following first `ndims` dimensions."""
   return tf.reduce_sum(tensor, axis=tuple(range(ndims, tensor.shape.ndims)))
 
+def summarize_anchor_classification_loss(class_ids, cls_losses):
+    positive_indices = tf.where(tf.greater(class_ids, 0))
+    positive_anchor_cls_loss = tf.squeeze(
+        tf.gather(cls_losses, positive_indices), axis=1)
+    add_cdf_image_summary(positive_anchor_cls_loss,
+                                              'PositiveAnchorLossCDF')
+    negative_indices = tf.where(tf.equal(class_ids, 0))
+    negative_anchor_cls_loss = tf.squeeze(
+        tf.gather(cls_losses, negative_indices), axis=1)
+    add_cdf_image_summary(negative_anchor_cls_loss,
+                                              'NegativeAnchorLossCDF')
 
-def _get_feature_map_spatial_dims(self, feature_maps):
-  """Return list of spatial dimensions for each feature map in a list.
+def loss(box_encodings, class_predictions_with_background, 
+         gt_box_batch, anchors, matcher):
+  """Compute scalar loss tensors with respect to provided groundtruth."""
+  with tf.name_scope('Loss', [box_encodings, class_predictions_with_background,
+                     gt_box_batch, anchors, matcher]):
+      (batch_cls_targets, batch_cls_weights, batch_reg_targets,
+          batch_reg_weights, match_list)= target_assigner.target_assign(
+                                              gt_box_batch, anchors, matcher)
+      
+      LocLoss = WeightedSmoothL1LocalizationLoss()
+      ClsLoss = WeightedSoftmaxClassificationLoss()
+      location_losses = LocLoss(box_encodings,
+                                batch_reg_targets,
+                                ignore_nan_targets=True,
+                                scope='location_loss',
+                                weights=batch_reg_weights)
+      cls_losses = reduce_sum_trailing_dimensions(
+          ClsLoss(class_predictions_with_background,
+                  batch_cls_targets,
+                  scope='cls_loss',
+                  weights=batch_cls_weights),
+          ndims=2)
 
-  Args:
-    feature_maps: a list of tensors where the ith tensor has shape
-        [batch, height_i, width_i, depth_i].
+      if FLAGS.add_summaries:
+        class_ids = tf.argmax(batch_cls_targets, axis=2)
+        flattened_class_ids = tf.reshape(class_ids, [-1])
+        flattened_classification_losses = tf.reshape(cls_losses, [-1])
+        summarize_anchor_classification_loss(
+            flattened_class_ids, flattened_classification_losses)
+      localization_loss = tf.reduce_sum(location_losses)
+      classification_loss = tf.reduce_sum(cls_losses)
 
-  Returns:
-    a list of pairs (height, width) for each feature map in feature_maps
-  """
-  feature_map_shapes = [
-      shape_utils.combined_static_and_dynamic_shape(
-          feature_map) for feature_map in feature_maps
-  ]
-  return [(shape[1], shape[2]) for shape in feature_map_shapes]
+      # Optionally normalize by number of positive matches
+      normalizer = tf.constant(1.0, dtype=tf.float32)
+      if FLAGS.normalize_loss_by_num_matches:
+        normalizer = tf.maximum(tf.to_float(tf.reduce_sum(batch_reg_weights)),
+                                1.0)
 
+      localization_loss_normalizer = normalizer
+      if FLAGS.normalize_loc_loss_by_codesize:
+        localization_loss_normalizer *= 4
+      localization_loss = tf.multiply((1 / localization_loss_normalizer),
+                                      localization_loss,
+                                      name='localization_loss')
+      classification_loss = tf.multiply((1 / normalizer), 
+                                        classification_loss,
+                                        name='classification_loss')
+
+      loss_dict = {
+          str(localization_loss.op.name): localization_loss,
+          str(classification_loss.op.name): classification_loss
+      }
+  return loss_dict
 
 def build_model():
+  matcher = argmax_matcher.ArgMaxMatcher(matched_threshold=0.7,
+                                         unmatched_threshold=0.5)
+  anchors = anchor_generator.generate_anchors(feature_map_dims=[(7, 7), (4, 4)],
+                                              scales=[[0.75, 0.95], [0.70, 0.90]],
+                                              aspect_ratios=[[1.0, 1.0], [1.0, 1.0]])
   box_pred = box_predictor.SSDBoxPredictor(
         FLAGS.is_training, FLAGS.num_classes, box_code_size=4, 
         conv_hyperparams_fn = _conv_hyperparams_fn)
@@ -84,6 +144,10 @@ def build_model():
     batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                      else tf.GraphKeys.UPDATE_OPS)
     inputs = tf.placeholder(tf.float32, [2, 224, 224, 3], 'Inputs')
+    gt_box_0 = tf.placeholder(tf.float32, [5, 4], 'gt_boxes_0')
+    gt_box_1 = tf.placeholder(tf.float32, [8, 4], 'gt_boxes_1')
+    gt_box_batch = [gt_box_0, gt_box_1]
+    anchors = tf.convert_to_tensor(anchors, dtype=tf.float32, name='anchors')
     with slim.arg_scope([slim.batch_norm],
             is_training=(FLAGS.is_training and not FLAGS.freeze_batchnorm),
             updates_collections=batchnorm_updates_collections),\
@@ -96,90 +160,23 @@ def build_model():
       feature_maps = feature_map_generator.pooling_pyramid_feature_maps(
           base_feature_map_depth=0,
           num_layers=2,
-          image_features={
+          image_features={  
               'image_features': image_features['layer_19']
           })
-      #######################generate_anchors#################################
-    #  feature_map_spatial_dims = _get_feature_map_spatial_dims(
-   #       feature_maps.values())
-   #   image_shape = shape_utils.combined_static_and_dynamic_shape(inputs)
-   #   self._anchors = box_list_ops.concatenate(
-   #       self._anchor_generator.generate(
-#              feature_map_spatial_dims,
-  #            im_height=image_shape[1],
-  #            im_width=image_shape[2]))
-      ############################--待修改--###################################
       pred_dict = box_pred.predict(feature_maps.values(), [2, 2])
       box_encodings = tf.concat(pred_dict['box_encodings'], axis=1)
       if box_encodings.shape.ndims == 4 and box_encodings.shape[2] == 1:
         box_encodings = tf.squeeze(box_encodings, axis=2)
       class_predictions_with_background = tf.concat(
           pred_dict['class_predictions_with_background'], axis=1)
-    with tf.name_scope('Loss', [box_encodings, class_predictions_with_background]):
-    ########################gt vs anchors###############################
-      (batch_cls_targets, batch_cls_weights, batch_reg_targets,
-       batch_reg_weights, match_list) = self._assign_targets(
-           self.groundtruth_lists(fields.BoxListFields.boxes),
-           self.groundtruth_lists(fields.BoxListFields.classes),
-           keypoints, weights)
-      if self._add_summaries:
-        self._summarize_target_assignment(
-            self.groundtruth_lists(fields.BoxListFields.boxes), match_list)
+    loss_dict = loss(box_encodings, class_predictions_with_background,
+                     gt_box_batch, anchors, matcher)
 
-##################################################################
-      location_losses = WeightedSmoothL1LocalizationLoss(
-          box_encodings,
-          batch_reg_targets,
-          ignore_nan_targets=True,
-          scope='location_loss',
-          weights=batch_reg_weights)
-      cls_losses = reduce_sum_trailing_dimensions(
-          WeightedSoftmaxClassificationLoss(
-              class_predictions_with_background,
-              batch_cls_targets,
-              scope='cls_loss'
-              weights=batch_cls_weights),
-          ndims=2)
-#--------------------------------------
-      if self._hard_example_miner:
-        (localization_loss, classification_loss) = self._apply_hard_mining(
-            location_losses, cls_losses, pred_dict, match_list)
-        if self._add_summaries:
-          self._hard_example_miner.summarize()
-      else:
-        if self._add_summaries:
-          class_ids = tf.argmax(batch_cls_targets, axis=2)
-          flattened_class_ids = tf.reshape(class_ids, [-1])
-          flattened_classification_losses = tf.reshape(cls_losses, [-1])
-          self._summarize_anchor_classification_loss(
-              flattened_class_ids, flattened_classification_losses)
-        localization_loss = tf.reduce_sum(location_losses)
-        classification_loss = tf.reduce_sum(cls_losses)
-
-      # Optionally normalize by number of positive matches
-      normalizer = tf.constant(1.0, dtype=tf.float32)
-      if self._normalize_loss_by_num_matches:
-        normalizer = tf.maximum(tf.to_float(tf.reduce_sum(batch_reg_weights)),
-                                1.0)
-
-      localization_loss_normalizer = normalizer
-      if self._normalize_loc_loss_by_codesize:
-        localization_loss_normalizer *= self._box_coder.code_size
-      localization_loss = tf.multiply((1 / localization_loss_normalizer),
-                                      localization_loss,
-                                      name='localization_loss')
-      classification_loss = tf.multiply((1 / normalizer), 
-                                        classification_loss,
-                                        name='classification_loss')
-
-      loss_dict = {
-          str(localization_loss.op.name): localization_loss,
-          str(classification_loss.op.name): classification_loss
-      }
+  return g
 
 
 def main(unused_arg):
-  build_model()
+  g = build_model()
 
 
 if __name__ == '__main__':
