@@ -14,13 +14,13 @@ from detection_ops.losses import Loss, WeightedSmoothL1LocalizationLoss, Weighte
 tf.app.flags.DEFINE_string('master', '', 'Session master')
 tf.app.flags.DEFINE_integer('task', 0, 'Task')
 tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
-tf.app.flags.DEFINE_integer('batch_size', 128, 'Batch size')
+tf.app.flags.DEFINE_integer('batch_size', 2, 'Batch size')
 tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
-tf.app.flags.DEFINE_integer('number_of_steps', 4000,
+tf.app.flags.DEFINE_integer('number_of_steps', 6000,
                      'Number of training steps to perform before stopping')
-tf.app.flags.DEFINE_integer('image_size', 96, 'Input image resolution')
+tf.app.flags.DEFINE_integer('image_size', 256, 'Input image resolution')
 tf.app.flags.DEFINE_float('depth_multiplier', 0.50, 'Depth multiplier for mobilenet')
-tf.app.flags.DEFINE_bool('quantize', False, 'Quantize training')
+tf.app.flags.DEFINE_float('learning_rate', 0.001, 'learning rate for detection model')
 tf.app.flags.DEFINE_string('fine_tune_checkpoint', '/home/myfile/dl_chrome/mobilenet_v2_0.5_96/mobilenet_v2_0.5_96.ckpt',
                     'Checkpoint from which to start finetuning.')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/',
@@ -77,13 +77,14 @@ def summarize_anchor_classification_loss(class_ids, cls_losses):
                                               'NegativeAnchorLossCDF')
 
 def loss(box_encodings, class_predictions_with_background, 
-         gt_box_batch, anchors, matcher):
+         gt_box_batch, anchors, matcher, num_gt_boxes):
   """Compute scalar loss tensors with respect to provided groundtruth."""
   with tf.name_scope('Loss', [box_encodings, class_predictions_with_background,
                      gt_box_batch, anchors, matcher]):
       (batch_cls_targets, batch_cls_weights, batch_reg_targets,
           batch_reg_weights, match_list)= target_assigner.target_assign(
-                                              gt_box_batch, anchors, matcher)
+                                              gt_box_batch, anchors,
+                                              matcher,num_gt_boxes)
       
       LocLoss = WeightedSmoothL1LocalizationLoss()
       ClsLoss = WeightedSoftmaxClassificationLoss()
@@ -124,17 +125,15 @@ def loss(box_encodings, class_predictions_with_background,
                                         classification_loss,
                                         name='classification_loss')
 
-      loss_dict = {
-          str(localization_loss.op.name): localization_loss,
-          str(classification_loss.op.name): classification_loss
-      }
-  return loss_dict
+      total_loss = localization_loss + classification_loss
+  return total_loss
+
 
 def build_model():
   matcher = argmax_matcher.ArgMaxMatcher(matched_threshold=0.7,
                                          unmatched_threshold=0.5)
-  anchors = anchor_generator.generate_anchors(feature_map_dims=[(7, 7), (4, 4)],
-                                              scales=[[0.75, 0.95], [0.70, 0.90]],
+  anchors = anchor_generator.generate_anchors(feature_map_dims=[(8, 8), (4, 4)],
+                                              scales=[[0.75, 0.95], [0.50, 0.80]],
                                               aspect_ratios=[[1.0, 1.0], [1.0, 1.0]])
   box_pred = box_predictor.SSDBoxPredictor(
         FLAGS.is_training, FLAGS.num_classes, box_code_size=4, 
@@ -143,10 +142,10 @@ def build_model():
   with g.as_default():
     batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                      else tf.GraphKeys.UPDATE_OPS)
-    inputs = tf.placeholder(tf.float32, [2, 224, 224, 3], 'Inputs')
-    gt_box_0 = tf.placeholder(tf.float32, [5, 4], 'gt_boxes_0')
-    gt_box_1 = tf.placeholder(tf.float32, [8, 4], 'gt_boxes_1')
-    gt_box_batch = [gt_box_0, gt_box_1]
+    inputs = tf.placeholder(tf.float32, [2, 256, 256, 3], 'Inputs')
+    gt_box_batch = tf.constant([[[0.232,0.156,0.432,0.356],[0.115,0.456,0.345,0.789]],[[0.345,0.678,0.698,0.835],[0.0,0.0,0.0,0.0]]],
+                                dtype=tf.float32, name='boxes')
+    num_gt_boxes = tf.constant([2, 1], dtype=tf.int32, name='num_boxes')
     anchors = tf.convert_to_tensor(anchors, dtype=tf.float32, name='anchors')
     with slim.arg_scope([slim.batch_norm],
             is_training=(FLAGS.is_training and not FLAGS.freeze_batchnorm),
@@ -169,10 +168,72 @@ def build_model():
         box_encodings = tf.squeeze(box_encodings, axis=2)
       class_predictions_with_background = tf.concat(
           pred_dict['class_predictions_with_background'], axis=1)
-    loss_dict = loss(box_encodings, class_predictions_with_background,
-                     gt_box_batch, anchors, matcher)
+    total_loss = loss(box_encodings, class_predictions_with_background,
+                     gt_box_batch, anchors, matcher, num_gt_boxes)
+    # Configure the learning rate using an exponential decay.
+    total_loss = tf.identity(total_loss, name='total_loss')
+    num_epochs_per_decay = 1
+    imagenet_size = 3000
+    decay_steps = int(imagenet_size / FLAGS.batch_size * num_epochs_per_decay)
 
-  return g
+    learning_rate = tf.train.exponential_decay(
+        FLAGS.learning_rate,
+        tf.train.get_or_create_global_step(), 
+        decay_steps,
+        _LEARNING_RATE_DECAY_FACTOR,
+        staircase=False)
+    #opt = tf.train.GradientDescentOptimizer(learning_rate)
+    opt = tf.train.RMSPropOptimizer(learning_rate, decay=0.9, momentum=0.9)
+    train_tensor = slim.learning.create_train_op(
+        total_loss,
+        optimizer=opt)
+
+  slim.summaries.add_scalar_summary(total_loss, 'total_loss', 'losses')
+  slim.summaries.add_scalar_summary(learning_rate, 'learning_rate', 'training')
+  return g, train_tensor
+
+
+def get_checkpoint_init_fn():
+  """Returns the checkpoint init_fn if the checkpoint is provided."""
+  if FLAGS.fine_tune_checkpoint:
+    variables_to_restore = slim.get_variables_to_restore(include=['MobilenetV2/'])
+    global_step_reset = tf.assign(tf.train.get_or_create_global_step(), 0)
+    # When restoring from a floating point model, the min/max values for
+    # quantized weights and activations are not present.
+    # We instruct slim to ignore variables that are missing during restoration
+    # by setting ignore_missing_vars=True
+    slim_init_fn = slim.assign_from_checkpoint_fn(
+        FLAGS.fine_tune_checkpoint,
+        variables_to_restore,
+        ignore_missing_vars=True)
+
+    def init_fn(sess):
+      slim_init_fn(sess)
+      # If we are restoring from a floating point model, we need to initialize
+      # the global step to zero for the exponential decay to result in
+      # reasonable learning rates.
+      sess.run(global_step_reset)
+    return init_fn
+  else:
+    return None
+
+
+def train_model():
+  """Trains ssd_mobilenet_v2_ppn."""
+  g, train_tensor = build_model()
+  with g.as_default():
+    slim.learning.train(
+        train_tensor,
+        FLAGS.checkpoint_dir,
+        is_chief=(FLAGS.task == 0),
+        master=FLAGS.master,
+        log_every_n_steps=FLAGS.log_every_n_steps,
+        graph=g,
+        number_of_steps=FLAGS.number_of_steps,
+        save_summaries_secs=FLAGS.save_summaries_secs,
+        save_interval_secs=FLAGS.save_interval_secs,
+        init_fn=get_checkpoint_init_fn(),
+        global_step=tf.train.get_global_step())
 
 
 def main(unused_arg):
