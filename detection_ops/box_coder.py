@@ -97,8 +97,8 @@ def decode(rel_codes, anchors, scale_factors=True):
     if scale_factors:
       ty /= 10.0
       tx /= 10.0
-      th /= 10.0
-      tw /= 10.0
+      th /= 5.0
+      tw /= 5.0
     w = tf.exp(tw) * wa
     h = tf.exp(th) * ha
     ycenter = ty * ha + ycenter_a
