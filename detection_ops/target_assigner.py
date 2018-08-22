@@ -71,13 +71,13 @@ def assign(gt_boxes, anchors,
            gt_labels=None,
            gt_weights=None):
   gt_boxes = tf.identity(gt_boxes, name='gt_boxes')
-  num_gt_boxes = shape_utils.combined_static_and_dynamic_shape(gt_boxes)
+  num_batch = shape_utils.combined_static_and_dynamic_shape(gt_boxes)
   if gt_labels is None:
-    gt_labels = tf.ones([num_gt_boxes[0]], dtype=tf.float32)
+    gt_labels = tf.ones([num_batch[0]], dtype=tf.float32)
     gt_labels = tf.expand_dims(gt_labels, -1)
     gt_labels = tf.pad(gt_labels, [[0, 0], [1, 0]], mode='CONSTANT')
   if gt_weights is None:
-    gt_weights = tf.ones([num_gt_boxes[0]], dtype=tf.float32)
+    gt_weights = tf.ones([num_batch[0]], dtype=tf.float32)
   
   match_quality_matrix = iou(gt_boxes, anchors)
   match = matcher.match(match_quality_matrix)
@@ -89,7 +89,7 @@ def assign(gt_boxes, anchors,
   reg_weights = create_regression_weights(match, gt_weights)
   cls_weights = create_classification_weights(match,
                                                gt_weights)
-
+  print(reg_targets, cls_targets, reg_weights, cls_weights)
   num_anchors = anchors.get_shape()[0].value
   if num_anchors is not None:
     reg_targets = reset_target_shape(reg_targets, num_anchors)
@@ -164,7 +164,7 @@ def create_classification_targets(groundtruth_labels, match):
     to anything are given the target self._unmatched_cls_target
 
     Args:
-      groundtruth_labels:  a tensor of shape [num_gt_boxes, d_1, ... d_k]
+      groundtruth_labels:  a tensor of shape [num_batch, d_1, ... d_k]
         with labels for each of the ground_truth boxes. The subshape
         [d_1, ... d_k] can be empty (corresponding to scalar labels).
       match: a matcher.Match object that provides a matching between anchors
@@ -173,7 +173,7 @@ def create_classification_targets(groundtruth_labels, match):
     Returns:
       a float32 tensor with shape [num_anchors, d_1, d_2 ... d_k], where the
       subshape [d_1, ..., d_k] is compatible with groundtruth_labels which has
-      shape [num_gt_boxes, d_1, d_2, ... d_k].
+      shape [num_batch, d_1, d_2, ... d_k].
     """
     return match.gather_based_on_match(
         groundtruth_labels,
@@ -225,17 +225,17 @@ def create_classification_weights(match,
         ignored_value=0.,
         unmatched_value=1.0)
 
-def target_assign(gt_box_batch, anchors,
-                  matcher, num_gt_boxes):
+def target_assign(bbox_batch, anchors,
+                  matcher, num_batch):
   cls_targets_list = []
   cls_weights_list = []
   reg_targets_list = []
   reg_weights_list = []
   match_list = []
-  batch = shape_utils.combined_static_and_dynamic_shape(num_gt_boxes)[0]
-  for i in range(batch):
+  batch_size = shape_utils.combined_static_and_dynamic_shape(num_batch)[0]
+  for i in range(batch_size):
     (cls_targets, cls_weights, reg_targets,
-     reg_weights, match) = assign(gt_box_batch[i][:num_gt_boxes[i]], anchors,
+     reg_weights, match) = assign(bbox_batch[i][:num_batch[i]], anchors,
                                   matcher)
     cls_targets_list.append(cls_targets)
     cls_weights_list.append(cls_weights)
@@ -246,5 +246,6 @@ def target_assign(gt_box_batch, anchors,
   batch_cls_weights = tf.stack(cls_weights_list)
   batch_reg_targets = tf.stack(reg_targets_list)
   batch_reg_weights = tf.stack(reg_weights_list)
+  print(batch_cls_targets)
   return (batch_cls_targets, batch_cls_weights, batch_reg_targets,
           batch_reg_weights, match_list)

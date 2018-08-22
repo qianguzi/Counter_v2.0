@@ -91,7 +91,7 @@ def decode(rel_codes, anchors, scale_factors=True):
     Returns:
       boxes: BoxList holding N bounding boxes.
     """
-    ycenter_a, xcenter_a, ha, wa = anchors.get_center_coordinates_and_sizes()
+    ycenter_a, xcenter_a, ha, wa = get_center_coordinates_and_sizes(anchors)
 
     ty, tx, th, tw = tf.unstack(tf.transpose(rel_codes))
     if scale_factors:

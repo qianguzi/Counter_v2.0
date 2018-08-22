@@ -99,7 +99,7 @@ def get_batch(filename, batch_size, shuffle=True):
     capacity = 5 * batch_size
 
     img_batch, label_batch, name_batch = tf.train.batch([image, label, name], batch_size,
-                                                            capacity=capacity, num_threads=4,)
+                                                            capacity=capacity, num_threads=4)
     return img_batch, label_batch, name_batch
 
 
