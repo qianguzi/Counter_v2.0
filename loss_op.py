@@ -1,3 +1,5 @@
+import tensorflow as tf
+import tensorflow.contrib.slim as slim
 import matplotlib; matplotlib.use('Agg')  # pylint: disable=multiple-statements
 import matplotlib.pyplot as plt  # pylint: disable=g-import-not-at-top
 
@@ -25,9 +27,10 @@ def loss(box_encodings, class_predictions_with_background,
          bbox_batch, anchors, matcher, num_batch,
          add_summaries=False,
          normalize_loss_by_num_matches=True,
-         normalize_loc_loss_by_codesize=True,):
+         normalize_loc_loss_by_codesize=True,
+         scope=None):
   """Compute scalar loss tensors with respect to provided groundtruth."""
-  with tf.name_scope('Loss', [box_encodings, class_predictions_with_background,
+  with tf.name_scope(scope, 'Loss', [box_encodings, class_predictions_with_background,
                      bbox_batch, anchors, matcher, num_batch]):
       (batch_cls_targets, batch_cls_weights, batch_reg_targets,
           batch_reg_weights, match_list)= target_assigner.target_assign(

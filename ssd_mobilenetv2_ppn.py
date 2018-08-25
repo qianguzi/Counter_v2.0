@@ -10,14 +10,15 @@ from detection_ops import feature_map_generator, box_predictor, anchor_generator
 tf.app.flags.DEFINE_string('master', '', 'Session master')
 tf.app.flags.DEFINE_integer('task', 0, 'Task')
 tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
-tf.app.flags.DEFINE_integer('batch_size', 8, 'Batch size')
+tf.app.flags.DEFINE_integer('batch_size', 10, 'Batch size')
 tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
-tf.app.flags.DEFINE_integer('number_of_steps', 6000,
+tf.app.flags.DEFINE_integer('number_of_steps', 30000,
                      'Number of training steps to perform before stopping')
-tf.app.flags.DEFINE_integer('image_size', 256, 'Input image resolution')
-tf.app.flags.DEFINE_float('depth_multiplier', 0.50, 'Depth multiplier for mobilenet')
-tf.app.flags.DEFINE_float('learning_rate', 0.001, 'learning rate for detection model')
-tf.app.flags.DEFINE_string('fine_tune_checkpoint', '/home/myfile/dl_chrome/mobilenet_v2_0.5_96/mobilenet_v2_0.5_96.ckpt',
+tf.app.flags.DEFINE_integer('image_size', 320, 'Input image resolution')
+tf.app.flags.DEFINE_float('depth_multiplier', 1.0, 'Depth multiplier for mobilenet')
+tf.app.flags.DEFINE_float('learning_rate', 0.002, 'learning rate for detection model')
+tf.app.flags.DEFINE_string('fine_tune_checkpoint',
+                    '/home/myfile/dl_chrome/mobilenet_v2_0.75_96/mobilenet_v2_0.75_96.ckpt',
                     'Checkpoint from which to start finetuning.')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/',
                     'Directory for writing training checkpoints and logs')
@@ -35,7 +36,7 @@ tf.app.flags.DEFINE_bool('is_training', True, 'train or eval')
 
 FLAGS = tf.app.flags.FLAGS
 
-_LEARNING_RATE_DECAY_FACTOR = 0.98
+_LEARNING_RATE_DECAY_FACTOR = 0.95
 
 
 def _conv_hyperparams_fn():
@@ -55,11 +56,11 @@ def _conv_hyperparams_fn():
 
 
 def build_model():
-  matcher = argmax_matcher.ArgMaxMatcher(matched_threshold=0.7,
+  matcher = argmax_matcher.ArgMaxMatcher(matched_threshold=0.6,
                                          unmatched_threshold=0.4)
-  anchors = anchor_generator.generate_anchors(feature_map_dims=[(8, 8), (4, 4)],
-                                              scales=[[0.95], [0.60, 0.80]],
-                                              aspect_ratios=[[1.0], [1.0, 1.0]])
+  anchors = anchor_generator.generate_anchors(feature_map_dims=[(10, 10), (5, 5), (3, 3)],
+                                              scales=[[0.60], [0.70, 0.90], [0.5, 0.75]],
+                                              aspect_ratios=[[1.0], [1.0, 1.0], [1.0, 1.0]])
   box_pred = box_predictor.SSDBoxPredictor(
         FLAGS.is_training, FLAGS.num_classes, box_code_size=4, 
         conv_hyperparams_fn = _conv_hyperparams_fn)
@@ -70,7 +71,7 @@ def build_model():
                                      else tf.GraphKeys.UPDATE_OPS)
     img_batch, bbox_batch, num_batch, _ = data_ops.get_batch(FLAGS.dataset_dir,
                                                              FLAGS.batch_size)
-
+    preimg_batch = tf.cast(img_batch, tf.float32) / 127.5 - 1
     anchors = tf.convert_to_tensor(anchors, dtype=tf.float32, name='anchors')
     with slim.arg_scope([slim.batch_norm],
             is_training=(FLAGS.is_training and not FLAGS.freeze_batchnorm),
@@ -78,17 +79,17 @@ def build_model():
         slim.arg_scope(
             mobilenet_v2.training_scope(is_training=None, bn_decay=0.9997)):
       _, image_features = mobilenet_v2.mobilenet_base(
-          img_batch,
-          final_endpoint='layer_19',
+          preimg_batch,
+          final_endpoint='layer_18',
           depth_multiplier=FLAGS.depth_multiplier,
           finegrain_classification_mode=True)
       feature_maps = feature_map_generator.pooling_pyramid_feature_maps(
           base_feature_map_depth=0,
-          num_layers=2,
+          num_layers=3,
           image_features={  
-              'image_features': image_features['layer_19']
+              'image_features': image_features['layer_18']
           })
-      pred_dict = box_pred.predict(feature_maps.values(), [1, 2])
+      pred_dict = box_pred.predict(feature_maps.values(), [1, 2, 2])
       box_encodings = tf.concat(pred_dict['box_encodings'], axis=1)
       if box_encodings.shape.ndims == 4 and box_encodings.shape[2] == 1:
         box_encodings = tf.squeeze(box_encodings, axis=2)
@@ -98,8 +99,8 @@ def build_model():
                      bbox_batch, anchors, matcher, num_batch)
     # Configure the learning rate using an exponential decay.
     total_loss = tf.identity(total_loss, name='total_loss')
-    num_epochs_per_decay = 1
-    imagenet_size = 2592
+    num_epochs_per_decay = 2
+    imagenet_size = 5400
     decay_steps = int(imagenet_size / FLAGS.batch_size * num_epochs_per_decay)
 
     learning_rate = tf.train.exponential_decay(
@@ -108,8 +109,8 @@ def build_model():
         decay_steps,
         _LEARNING_RATE_DECAY_FACTOR,
         staircase=False)
-    #opt = tf.train.GradientDescentOptimizer(learning_rate)
-    opt = tf.train.RMSPropOptimizer(learning_rate, decay=0.9, momentum=0.9)
+
+    opt = tf.train.AdamOptimizer(learning_rate)
     train_tensor = slim.learning.create_train_op(
         total_loss,
         optimizer=opt)
@@ -160,7 +161,7 @@ def train_model():
         save_interval_secs=FLAGS.save_interval_secs,
         init_fn=get_checkpoint_init_fn(),
         global_step=tf.train.get_global_step(),
-        saver=tf.train.Saver(max_to_keep=45))
+        saver=tf.train.Saver(max_to_keep=100))
 
 
 def main(unused_arg):

@@ -1,3 +1,4 @@
+import os, cv2
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
@@ -7,21 +8,25 @@ from mobilenet import mobilenet_v2
 from detection_ops.utils import shape_utils, data_ops
 from detection_ops import feature_map_generator, box_predictor, anchor_generator
 
+tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
 tf.app.flags.DEFINE_integer('batch_size', 8, 'Batch size')
 tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
-tf.app.flags.DEFINE_integer('image_size', 256, 'Input image resolution')
-tf.app.flags.DEFINE_float('depth_multiplier', 0.50, 'Depth multiplier for mobilenet')
+tf.app.flags.DEFINE_integer('image_size', 320, 'Input image resolution')
+tf.app.flags.DEFINE_integer('num_examples', 6000, 'the number of examples')
+tf.app.flags.DEFINE_float('depth_multiplier', 1.0, 'Depth multiplier for mobilenet')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/',
                     'Directory for writing training checkpoints and logs')
-tf.app.flags.DEFINE_string('dataset_dir', '../tfrecords/train.tfrecords', 'Location of dataset')
+tf.app.flags.DEFINE_string('dataset_dir', '../tfrecords/test.tfrecords', 'Location of dataset')
+tf.app.flags.DEFINE_string('imwrite_dir', '/media/jun/data/capdataset/detect/result/',
+                    'Location of result_imgs')
 tf.app.flags.DEFINE_bool('freeze_batchnorm', True,
                      'Whether to freeze batch norm parameters during training or not')
 tf.app.flags.DEFINE_bool('inplace_batchnorm_update', True,
                      'Whether to update batch norm moving average values inplace')
 tf.app.flags.DEFINE_bool('is_training', False, 'train or eval')
-tf.app.flags.DEFINE_integer('max_output_size', 18, 'Max_output_size')
-tf.app.flags.DEFINE_integer('iou_threshold', 0.4, 'iou_threshold')
-tf.app.flags.DEFINE_integer('score_threshold', 0.75, 'score_threshold')
+tf.app.flags.DEFINE_integer('max_output_size', 200, 'Max_output_size')
+tf.app.flags.DEFINE_float('iou_threshold', 0.0, 'iou_threshold')
+tf.app.flags.DEFINE_float('score_threshold', 0.0, 'score_threshold')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -67,18 +72,19 @@ def _batch_decode(box_encodings, anchors):
         [combined_shape[0], combined_shape[1], 4]))
     return decoded_boxes
 
-def postprocess(box_encodings, class_predictions_with_background, anchors, true_image_shapes):
+def postprocess(anchors, box_encodings,
+                class_predictions_with_background,
+                scope=None):
     """Converts prediction tensors to final detections."""
-    with tf.name_scope('Postprocessor'):
-      max_total_size = tf.constant(FLAGS.max_output_size, dtype=int32)
-      box_encodings = box_encodings
+    with tf.name_scope(scope, 'Postprocessor',
+                    [anchors, box_encodings, class_predictions_with_background]):
+      max_total_size = tf.constant(FLAGS.max_output_size, dtype=tf.int32)
       box_encodings = tf.identity(box_encodings, 'raw_box_encodings')
-      class_predictions = class_predictions_with_background
       detection_boxes = _batch_decode(box_encodings, anchors)
       detection_boxes = tf.identity(detection_boxes, 'raw_box_locations')
-      detection_boxes = tf.expand_dims(detection_boxes, axis=2)
 
-      detection_scores_with_background = tf.sigmoid(class_predictions, name='sigmoid')
+      detection_scores_with_background = tf.nn.softmax(
+          class_predictions_with_background, name='softmax')
       detection_scores_with_background = tf.identity(
           detection_scores_with_background, 'raw_box_scores')
       detection_scores = tf.slice(detection_scores_with_background, [0, 0, 1],
@@ -89,37 +95,41 @@ def postprocess(box_encodings, class_predictions_with_background, anchors, true_
       detection_scores_list = []
       num_detections_list = []
       for i in range(FLAGS.batch_size):
-        positive_indices = tf.cast(tf.reshape(
-          tf.where(tf.equal(tf.argmax(detection_scores_with_background[i], 1), 1)),
-          [-1]), tf.int32)
-        detection_boxes = tf.gather(detection_boxes[i], positive_indices)
-        detection_scores = tf.gather(detection_scores[i], positive_indices)
+        positive_loc = tf.equal(
+            tf.argmax(detection_scores_with_background[i], 1),
+            0)
+        positive_indices = tf.cast(
+            tf.squeeze(tf.where(positive_loc), 1), 
+            tf.int32)
+        detection_box = tf.gather(detection_boxes[i], positive_indices)
+        detection_score = tf.gather(detection_scores[i], positive_indices)
 
         high_score_indices = tf.cast(tf.reshape(
-          tf.where(tf.greater(detection_scores, FLAGS.score_threshold)),
+          tf.where(tf.greater(detection_score, FLAGS.score_threshold)),
           [-1]), tf.int32)
-        detection_boxes = tf.gather(detection_boxes, high_score_indices)
-        detection_scores = tf.gather(detection_scores, high_score_indices)
+        detection_box = tf.gather(detection_box, high_score_indices)
+        detection_score = tf.gather(detection_score, high_score_indices)
 
         selected_indices = tf.image.non_max_suppression(
-             detection_boxes,
-             detection_scores,
+             detection_box,
+             detection_score,
              max_output_size=FLAGS.max_output_size,
-             iou_threshold==FLAGS.iou_threshold)
-        detection_boxes = tf.gather(detection_boxes, selected_indices)
-        detection_scores = tf.gather(detection_scores, selected_indices)
-        num_detections = shape_utils.combined_static_and_dynamic_shape(detection_boxes)[0]
-        detection_boxes = tf.pad(detection_boxes,
+             iou_threshold=FLAGS.iou_threshold)
+        detection_box = tf.gather(detection_box, selected_indices)
+        detection_score = tf.gather(detection_score, selected_indices)
+        
+        num_detections = shape_utils.combined_static_and_dynamic_shape(detection_box)[0]
+        detection_box = tf.pad(detection_box,
                                   [[0, max_total_size - num_detections],[0, 0]])
-        detection_scores = tf.pad(detection_scores,
+        detection_score = tf.pad(detection_score,
                                   [[0, max_total_size - num_detections]])
-        detection_boxes_list.append(detection_boxes)
-        detection_scores_list.append(detection_scores)
+        detection_boxes_list.append(detection_box)
+        detection_scores_list.append(detection_score)
         num_detections_list.append(num_detections)
 
-      detection_boxes = tf.concat(detection_boxes_list)
-      detection_scores = tf.concat(detection_scores_list)
-      num_detections = tf.concat(num_detections_list)
+      detection_boxes = tf.stack(detection_boxes_list)
+      detection_scores = tf.stack(detection_scores_list)
+      num_detections = tf.stack(num_detections_list)
       detection_dict = {
           'detection_boxes': detection_boxes,
           'detection_scores': detection_scores,
@@ -129,9 +139,9 @@ def postprocess(box_encodings, class_predictions_with_background, anchors, true_
       return detection_dict
 
 def build_model():
-  anchors = anchor_generator.generate_anchors(feature_map_dims=[(8, 8), (4, 4)],
-                                              scales=[[0.95], [0.60, 0.80]],
-                                              aspect_ratios=[[1.0], [1.0, 1.0]])
+  anchors = anchor_generator.generate_anchors(feature_map_dims=[(10, 10), (5, 5), (3, 3)],
+                                              scales=[[0.60], [0.70, 0.90], [0.50, 0.75]],
+                                              aspect_ratios=[[1.0], [1.0, 1.0], [1.0, 1.0]])
   box_pred = box_predictor.SSDBoxPredictor(
         FLAGS.is_training, FLAGS.num_classes, box_code_size=4, 
         conv_hyperparams_fn = _conv_hyperparams_fn)
@@ -140,7 +150,8 @@ def build_model():
       tf.train.replica_device_setter(FLAGS.ps_tasks)):
     batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                      else tf.GraphKeys.UPDATE_OPS)
-    img_batch, bbox_batch, num_batch, name_batch = data_ops.get_batch(FLAGS.dataset_dir, 8)
+    img_batch, _, _, name_batch = data_ops.get_batch(FLAGS.dataset_dir, 8)
+    preimg_batch = tf.cast(img_batch, tf.float32) / 127.5 - 1
     anchors = tf.convert_to_tensor(anchors, dtype=tf.float32, name='anchors')
     with slim.arg_scope([slim.batch_norm],
             is_training=(FLAGS.is_training and not FLAGS.freeze_batchnorm),
@@ -148,25 +159,25 @@ def build_model():
         slim.arg_scope(
             mobilenet_v2.training_scope(is_training=None, bn_decay=0.9997)):
       _, image_features = mobilenet_v2.mobilenet_base(
-          img_batch,
-          final_endpoint='layer_19',
+          preimg_batch,
+          final_endpoint='layer_18',
           depth_multiplier=FLAGS.depth_multiplier,
           finegrain_classification_mode=True)
       feature_maps = feature_map_generator.pooling_pyramid_feature_maps(
           base_feature_map_depth=0,
-          num_layers=2,
+          num_layers=3,
           image_features={  
-              'image_features': image_features['layer_19']
+              'image_features': image_features['layer_18']
           })
-      pred_dict = box_pred.predict(feature_maps.values(), [1, 2])
+      pred_dict = box_pred.predict(feature_maps.values(), [1, 2, 2])
       box_encodings = tf.concat(pred_dict['box_encodings'], axis=1)
       if box_encodings.shape.ndims == 4 and box_encodings.shape[2] == 1:
         box_encodings = tf.squeeze(box_encodings, axis=2)
       class_predictions_with_background = tf.concat(
           pred_dict['class_predictions_with_background'], axis=1)
-    detection_dict = postprocess(box_encodings, class_predictions_with_background,
-                      anchors)
-  return g
+    detection_dict = postprocess(anchors, box_encodings,
+                                class_predictions_with_background)
+  return g, img_batch, name_batch, detection_dict
 
 
 def load(sess, saver, checkpoint_dir):
@@ -184,8 +195,27 @@ def load(sess, saver, checkpoint_dir):
     else:
         raise Exception("[*] Failed to find a checkpoint")
 
+def draw_and_save(imgs, names, bboxes, scores, nums):
+    batch_size, h, w, d = imgs.shape
+    bboxes = (bboxes * h).astype(int)
+    for n in range(batch_size):
+        img = imgs[n]
+        bbox = bboxes[n]
+        score = scores[n]
+        if d == 1:
+            color_img = cv2.cvtColor(imgs[n], cv2.COLOR_GRAY2RGB)
+        else:
+            color_img = imgs[n]
+        for i in range(nums[n]):
+            cv2.rectangle(color_img, (bbox[i][0], bbox[i][1]),
+                          (bbox[i][2], bbox[i][3]), (0, 255, 0), 1)
+            cv2.putText(color_img, 'cap' + str(i+1) + ':' + str(score[i])[0:4], (bbox[i][0], bbox[i][3]),
+                        cv2.FONT_HERSHEY_COMPLEX, 0.2, (0, 0, 255), 1)
+        cv2.imwrite(FLAGS.imwrite_dir + str(names[n]) + '_result.jpg', color_img)
+
+
 def test_model():
-    g, _, _ = build_model()
+    g, img_batch, name_batch, detection_dict = build_model()
     with g.as_default():
       init_op = tf.group(tf.global_variables_initializer(),
                        tf.local_variables_initializer())
@@ -198,22 +228,17 @@ def test_model():
         print('[*] Try to load trained model...')
         ckpt_name = load(sess, saver, FLAGS.checkpoint_dir)
 
-        step = 0
         max_steps = int(FLAGS.num_examples / FLAGS.batch_size)
         print('START TESTING...')
-        try:
-          while not coord.should_stop():
-            for _step in range(step+1, step+max_steps+1):
-              # test
-
-          if _step % 20 == 0:
-        except tf.errors.OutOfRangeError:
-          accuracy = 1 - len(errors_name)/FLAGS.num_examples
-          print(time.strftime("%X"),
-                'RESULT >>> current_acc:{0:.6f}'.format(accuracy))
-        finally:
-          coord.request_stop()
-          coord.join(threads)
+        for i in range(max_steps):
+          # test
+          imgs, names, bboxes, scores, nums= sess.run([img_batch, name_batch, 
+                                                detection_dict['detection_boxes'],
+                                                detection_dict['detection_scores'],
+                                                detection_dict['num_detections']])
+          draw_and_save(imgs, names, bboxes, scores, nums)
+        coord.request_stop()
+        coord.join(threads)
         print('FINISHED TESTING.')
 
 
