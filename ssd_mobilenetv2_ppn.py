@@ -10,15 +10,15 @@ from detection_ops import feature_map_generator, box_predictor, anchor_generator
 tf.app.flags.DEFINE_string('master', '', 'Session master')
 tf.app.flags.DEFINE_integer('task', 0, 'Task')
 tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
-tf.app.flags.DEFINE_integer('batch_size', 10, 'Batch size')
+tf.app.flags.DEFINE_integer('batch_size', 20, 'Batch size')
 tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
 tf.app.flags.DEFINE_integer('number_of_steps', 30000,
                      'Number of training steps to perform before stopping')
 tf.app.flags.DEFINE_integer('image_size', 320, 'Input image resolution')
-tf.app.flags.DEFINE_float('depth_multiplier', 1.0, 'Depth multiplier for mobilenet')
-tf.app.flags.DEFINE_float('learning_rate', 0.002, 'learning rate for detection model')
+tf.app.flags.DEFINE_float('depth_multiplier', 0.75, 'Depth multiplier for mobilenet')
+tf.app.flags.DEFINE_float('learning_rate', 0.0001, 'learning rate for detection model')
 tf.app.flags.DEFINE_string('fine_tune_checkpoint',
-                    '/home/myfile/dl_chrome/mobilenet_v2_0.75_96/mobilenet_v2_0.75_96.ckpt',
+                    '/home/jun/mynb/count/model.ckpt-482',
                     'Checkpoint from which to start finetuning.')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/',
                     'Directory for writing training checkpoints and logs')
@@ -28,7 +28,7 @@ tf.app.flags.DEFINE_integer('save_summaries_secs', 10,
                      'How often to save summaries, secs')
 tf.app.flags.DEFINE_integer('save_interval_secs', 300,
                      'How often to save checkpoints, secs')
-tf.app.flags.DEFINE_bool('freeze_batchnorm', True,
+tf.app.flags.DEFINE_bool('freeze_batchnorm', False,
                      'Whether to freeze batch norm parameters during training or not')
 tf.app.flags.DEFINE_bool('inplace_batchnorm_update', True,
                      'Whether to update batch norm moving average values inplace')
@@ -36,7 +36,7 @@ tf.app.flags.DEFINE_bool('is_training', True, 'train or eval')
 
 FLAGS = tf.app.flags.FLAGS
 
-_LEARNING_RATE_DECAY_FACTOR = 0.95
+_LEARNING_RATE_DECAY_FACTOR = 0.9
 
 
 def _conv_hyperparams_fn():
@@ -46,21 +46,21 @@ def _conv_hyperparams_fn():
     An argument scope to use via arg_scope.
   """
   # Set weight_decay for weights in Conv layers.
-  with slim.arg_scope([slim.batch_norm], decay=0.999), \
+  with slim.arg_scope([slim.batch_norm], decay=0.997), \
        slim.arg_scope([slim.conv2d, slim.separable_conv2d],
-                    weights_initializer=tf.truncated_normal_initializer(),
+                    weights_initializer=tf.truncated_normal_initializer(stddev=0.09),
                     normalizer_fn=slim.batch_norm), \
        slim.arg_scope([slim.conv2d], \
-                    weights_regularizer=slim.l2_regularizer(scale=1.0)) as s:
+                    weights_regularizer=slim.l2_regularizer(0.00004)) as s:
     return s
 
 
 def build_model():
-  matcher = argmax_matcher.ArgMaxMatcher(matched_threshold=0.6,
-                                         unmatched_threshold=0.4)
+  matcher = argmax_matcher.ArgMaxMatcher(matched_threshold=0.5,
+                                         unmatched_threshold=0.3)
   anchors = anchor_generator.generate_anchors(feature_map_dims=[(10, 10), (5, 5), (3, 3)],
-                                              scales=[[0.60], [0.70, 0.90], [0.5, 0.75]],
-                                              aspect_ratios=[[1.0], [1.0, 1.0], [1.0, 1.0]])
+                                              scales=[[0.95], [0.90], [0.60, 0.80]],
+                                              aspect_ratios=[[1.0], [1.0], [1.0, 1.0]])
   box_pred = box_predictor.SSDBoxPredictor(
         FLAGS.is_training, FLAGS.num_classes, box_code_size=4, 
         conv_hyperparams_fn = _conv_hyperparams_fn)
@@ -77,7 +77,7 @@ def build_model():
             is_training=(FLAGS.is_training and not FLAGS.freeze_batchnorm),
             updates_collections=batchnorm_updates_collections),\
         slim.arg_scope(
-            mobilenet_v2.training_scope(is_training=None, bn_decay=0.9997)):
+            mobilenet_v2.training_scope(is_training=None, bn_decay=0.997)):
       _, image_features = mobilenet_v2.mobilenet_base(
           preimg_batch,
           final_endpoint='layer_18',
@@ -89,7 +89,7 @@ def build_model():
           image_features={  
               'image_features': image_features['layer_18']
           })
-      pred_dict = box_pred.predict(feature_maps.values(), [1, 2, 2])
+      pred_dict = box_pred.predict(feature_maps.values(), [1, 1, 2])
       box_encodings = tf.concat(pred_dict['box_encodings'], axis=1)
       if box_encodings.shape.ndims == 4 and box_encodings.shape[2] == 1:
         box_encodings = tf.squeeze(box_encodings, axis=2)
@@ -123,7 +123,7 @@ def build_model():
 def get_checkpoint_init_fn():
   """Returns the checkpoint init_fn if the checkpoint is provided."""
   if FLAGS.fine_tune_checkpoint:
-    variables_to_restore = slim.get_variables_to_restore(include=['MobilenetV2/'])
+    variables_to_restore = slim.get_variables_to_restore()
     global_step_reset = tf.assign(tf.train.get_or_create_global_step(), 0)
     # When restoring from a floating point model, the min/max values for
     # quantized weights and activations are not present.

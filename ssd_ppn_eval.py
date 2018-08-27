@@ -13,7 +13,7 @@ tf.app.flags.DEFINE_integer('batch_size', 8, 'Batch size')
 tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
 tf.app.flags.DEFINE_integer('image_size', 320, 'Input image resolution')
 tf.app.flags.DEFINE_integer('num_examples', 6000, 'the number of examples')
-tf.app.flags.DEFINE_float('depth_multiplier', 1.0, 'Depth multiplier for mobilenet')
+tf.app.flags.DEFINE_float('depth_multiplier', 0.75, 'Depth multiplier for mobilenet')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/',
                     'Directory for writing training checkpoints and logs')
 tf.app.flags.DEFINE_string('dataset_dir', '../tfrecords/test.tfrecords', 'Location of dataset')
@@ -37,12 +37,12 @@ def _conv_hyperparams_fn():
     An argument scope to use via arg_scope.
   """
   # Set weight_decay for weights in Conv layers.
-  with slim.arg_scope([slim.batch_norm], decay=0.999), \
+  with slim.arg_scope([slim.batch_norm], decay=0.997), \
        slim.arg_scope([slim.conv2d, slim.separable_conv2d],
-                    weights_initializer=tf.truncated_normal_initializer(),
+                    weights_initializer=tf.truncated_normal_initializer(stddev=0.09),
                     normalizer_fn=slim.batch_norm), \
        slim.arg_scope([slim.conv2d], \
-                    weights_regularizer=slim.l2_regularizer(scale=1.0)) as s:
+                    weights_regularizer=slim.l2_regularizer(0.00004)) as s:
     return s
 
 def _batch_decode(box_encodings, anchors):
@@ -97,7 +97,7 @@ def postprocess(anchors, box_encodings,
       for i in range(FLAGS.batch_size):
         positive_loc = tf.equal(
             tf.argmax(detection_scores_with_background[i], 1),
-            0)
+            1)
         positive_indices = tf.cast(
             tf.squeeze(tf.where(positive_loc), 1), 
             tf.int32)
@@ -140,8 +140,8 @@ def postprocess(anchors, box_encodings,
 
 def build_model():
   anchors = anchor_generator.generate_anchors(feature_map_dims=[(10, 10), (5, 5), (3, 3)],
-                                              scales=[[0.60], [0.70, 0.90], [0.50, 0.75]],
-                                              aspect_ratios=[[1.0], [1.0, 1.0], [1.0, 1.0]])
+                                              scales=[[0.95], [0.90], [0.60, 0.80]],
+                                              aspect_ratios=[[1.0], [1.0], [1.0, 1.0]])
   box_pred = box_predictor.SSDBoxPredictor(
         FLAGS.is_training, FLAGS.num_classes, box_code_size=4, 
         conv_hyperparams_fn = _conv_hyperparams_fn)
@@ -157,7 +157,7 @@ def build_model():
             is_training=(FLAGS.is_training and not FLAGS.freeze_batchnorm),
             updates_collections=batchnorm_updates_collections),\
         slim.arg_scope(
-            mobilenet_v2.training_scope(is_training=None, bn_decay=0.9997)):
+            mobilenet_v2.training_scope(is_training=None, bn_decay=0.997)):
       _, image_features = mobilenet_v2.mobilenet_base(
           preimg_batch,
           final_endpoint='layer_18',
@@ -166,10 +166,10 @@ def build_model():
       feature_maps = feature_map_generator.pooling_pyramid_feature_maps(
           base_feature_map_depth=0,
           num_layers=3,
-          image_features={  
+          image_features={
               'image_features': image_features['layer_18']
           })
-      pred_dict = box_pred.predict(feature_maps.values(), [1, 2, 2])
+      pred_dict = box_pred.predict(feature_maps.values(), [1, 1, 2])
       box_encodings = tf.concat(pred_dict['box_encodings'], axis=1)
       if box_encodings.shape.ndims == 4 and box_encodings.shape[2] == 1:
         box_encodings = tf.squeeze(box_encodings, axis=2)
@@ -210,7 +210,7 @@ def draw_and_save(imgs, names, bboxes, scores, nums):
             cv2.rectangle(color_img, (bbox[i][0], bbox[i][1]),
                           (bbox[i][2], bbox[i][3]), (0, 255, 0), 1)
             cv2.putText(color_img, 'cap' + str(i+1) + ':' + str(score[i])[0:4], (bbox[i][0], bbox[i][3]),
-                        cv2.FONT_HERSHEY_COMPLEX, 0.2, (0, 0, 255), 1)
+                        cv2.FONT_HERSHEY_COMPLEX, 0.3, (0, 0, 255), 1)
         cv2.imwrite(FLAGS.imwrite_dir + str(names[n]) + '_result.jpg', color_img)
 
 

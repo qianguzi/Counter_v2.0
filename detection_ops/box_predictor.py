@@ -253,7 +253,7 @@ class SSDBoxPredictor(BoxPredictor):
                   [self._kernel_size, self._kernel_size],
                   scope='BoxEncodingPredictor')
             if self._use_dropout:
-              net = slim.dropout(net)
+              net = slim.dropout(net, keep_prob=0.8)
             if self._use_depthwise:
               class_predictions_with_background = slim.separable_conv2d(
                   net, None, [self._kernel_size, self._kernel_size],
