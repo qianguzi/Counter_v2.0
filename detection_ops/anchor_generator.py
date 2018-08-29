@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def _tile_anchors(grid_height,
+def tile_anchors(grid_height,
                  grid_width,
                  scale,
                  aspect_ratio,
@@ -65,6 +65,12 @@ def _tile_anchors(grid_height,
   bbox_centers = np.reshape(bbox_centers, [-1, 2])
   bbox_sizes = np.reshape(bbox_sizes, [-1, 2])
   bbox_corners = np.concatenate((bbox_centers - .5 * bbox_sizes, bbox_centers + .5 * bbox_sizes), 1)
+  bbox_corners = np.where(
+    np.greater_equal(bbox_corners, 0),
+    bbox_corners, np.zeros_like(bbox_corners))
+  bbox_corners = np.where(
+    np.greater_equal(bbox_corners, 1),
+    np.ones_like(bbox_corners), bbox_corners)
   return bbox_corners
 
 
@@ -94,7 +100,7 @@ def generate_anchors(feature_map_dims, scales, aspect_ratios):
           feature_map_dims, scales, 
           aspect_ratios, anchor_strides, 
           anchor_offsets):
-    tiled_anchors = _tile_anchors(grid_height=grid_size[0],
+    tiled_anchors = tile_anchors(grid_height=grid_size[0],
                                  grid_width=grid_size[1],
                                  scale=scale,
                                  aspect_ratio=aspect_ratio,

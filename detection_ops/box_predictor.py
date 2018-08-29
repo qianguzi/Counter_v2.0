@@ -129,7 +129,6 @@ class SSDBoxPredictor(BoxPredictor):
                is_training,
                num_classes,
                box_code_size,
-               conv_hyperparams_fn,
                min_depth=0,
                max_depth=0,
                num_layers_before_predictor=0,
@@ -146,8 +145,6 @@ class SSDBoxPredictor(BoxPredictor):
         include the background category, so if groundtruth labels take values
         in {0, 1, .., K-1}, num_classes=K (and not K+1, even though the
         assigned classification targets can range from {0,... K}).
-      conv_hyperparams_fn: A function to generate tf-slim arg_scope with
-        hyperparameters for convolution ops.
       min_depth: Minimum feature depth prior to predicting box encodings
         and class predictions.
       max_depth: Maximum feature depth prior to predicting box encodings
@@ -174,7 +171,6 @@ class SSDBoxPredictor(BoxPredictor):
     super(SSDBoxPredictor, self).__init__(is_training, num_classes)
     if min_depth > max_depth:
       raise ValueError('min_depth should be less than or equal to max_depth')
-    self._conv_hyperparams_fn = conv_hyperparams_fn
     self._min_depth = min_depth
     self._max_depth = max_depth
     self._num_layers_before_predictor = num_layers_before_predictor
@@ -226,53 +222,52 @@ class SSDBoxPredictor(BoxPredictor):
         # Add a slot for the background class.
         num_class_slots = self.num_classes
         net = image_feature
-        with slim.arg_scope(self._conv_hyperparams_fn()):
-          # Add additional conv layers before the class predictor.
-          features_depth = static_shape.get_depth(image_feature.get_shape())
-          depth = max(min(features_depth, self._max_depth), self._min_depth)
-          tf.logging.info('depth of additional conv before box predictor: {}'.
-                          format(depth))
-          if depth > 0 and self._num_layers_before_predictor > 0:
-            for i in range(self._num_layers_before_predictor):
-              net = slim.conv2d(
-                  net, depth, [1, 1], scope='Conv2d_%d_1x1_%d' % (i, depth))
-          with slim.arg_scope([slim.conv2d], activation_fn=None,
-                              normalizer_fn=None, normalizer_params=None):
-            if self._use_depthwise:
-              box_encodings = slim.separable_conv2d(
-                  net, None, [self._kernel_size, self._kernel_size],
-                  padding='SAME', depth_multiplier=1, stride=1,
-                  rate=1, scope='BoxEncodingPredictor_depthwise')
-              box_encodings = slim.conv2d(
-                  box_encodings,
-                  num_predictions_per_location * self._box_code_size, [1, 1],
-                  scope='BoxEncodingPredictor')
-            else:
-              box_encodings = slim.conv2d(
-                  net, num_predictions_per_location * self._box_code_size,
-                  [self._kernel_size, self._kernel_size],
-                  scope='BoxEncodingPredictor')
-            if self._use_dropout:
-              net = slim.dropout(net, keep_prob=0.8)
-            if self._use_depthwise:
-              class_predictions_with_background = slim.separable_conv2d(
-                  net, None, [self._kernel_size, self._kernel_size],
-                  padding='SAME', depth_multiplier=1, stride=1,
-                  rate=1, scope='ClassPredictor_depthwise')
-              class_predictions_with_background = slim.conv2d(
-                  class_predictions_with_background,
-                  num_predictions_per_location * num_class_slots,
-                  [1, 1], scope='ClassPredictor')
-            else:
-              class_predictions_with_background = slim.conv2d(
-                  net, num_predictions_per_location * num_class_slots,
-                  [self._kernel_size, self._kernel_size],
-                  scope='ClassPredictor',
-                  biases_initializer=tf.constant_initializer(
-                      self._class_prediction_bias_init))
-            if self._apply_sigmoid_to_scores:
-              class_predictions_with_background = tf.sigmoid(
-                  class_predictions_with_background)
+        
+        features_depth = static_shape.get_depth(image_feature.get_shape())
+        depth = max(min(features_depth, self._max_depth), self._min_depth)
+        tf.logging.info('depth of additional conv before box predictor: {}'.
+                        format(depth))
+        if depth > 0 and self._num_layers_before_predictor > 0:
+          for i in range(self._num_layers_before_predictor):
+            net = slim.conv2d(
+                net, depth, [1, 1], scope='Conv2d_%d_1x1_%d' % (i, depth))
+        with slim.arg_scope([slim.conv2d], activation_fn=None,
+                            normalizer_fn=None, normalizer_params=None):
+          if self._use_depthwise:
+            box_encodings = slim.separable_conv2d(
+                net, None, [self._kernel_size, self._kernel_size],
+                padding='SAME', depth_multiplier=1, stride=1,
+                rate=1, scope='BoxEncodingPredictor_depthwise')
+            box_encodings = slim.conv2d(
+                box_encodings,
+                num_predictions_per_location * self._box_code_size, [1, 1],
+                scope='BoxEncodingPredictor')
+          else:
+            box_encodings = slim.conv2d(
+                net, num_predictions_per_location * self._box_code_size,
+                [self._kernel_size, self._kernel_size],
+                scope='BoxEncodingPredictor')
+          if self._use_dropout:
+            net = slim.dropout(net, keep_prob=0.8)
+          if self._use_depthwise:
+            class_predictions_with_background = slim.separable_conv2d(
+                net, None, [self._kernel_size, self._kernel_size],
+                padding='SAME', depth_multiplier=1, stride=1,
+                rate=1, scope='ClassPredictor_depthwise')
+            class_predictions_with_background = slim.conv2d(
+                class_predictions_with_background,
+                num_predictions_per_location * num_class_slots,
+                [1, 1], scope='ClassPredictor')
+          else:
+            class_predictions_with_background = slim.conv2d(
+                net, num_predictions_per_location * num_class_slots,
+                [self._kernel_size, self._kernel_size],
+                scope='ClassPredictor',
+                biases_initializer=tf.constant_initializer(
+                    self._class_prediction_bias_init))
+          if self._apply_sigmoid_to_scores:
+            class_predictions_with_background = tf.sigmoid(
+                class_predictions_with_background)
 
         combined_feature_map_shape = (shape_utils.
                                       combined_static_and_dynamic_shape(

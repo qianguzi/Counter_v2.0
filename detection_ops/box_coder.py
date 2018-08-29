@@ -29,6 +29,7 @@ Faster RCNN box coder follows the coding schema described below:
 """
 
 import tensorflow as tf
+from detection_ops.utils import shape_utils
 
 EPSILON = 1e-8
 
@@ -42,7 +43,7 @@ def get_center_coordinates_and_sizes(box_corners, scope=None):
       a list of 4 1-D tensors [ycenter, xcenter, height, width].
     """
     with tf.name_scope(scope, 'get_center_coordinates_and_sizes'):
-      ymin, xmin, ymax, xmax = tf.unstack(tf.transpose(box_corners))
+      xmin, ymin, xmax, ymax = tf.unstack(tf.transpose(box_corners))
       width = xmax - xmin
       height = ymax - ymin
       ycenter = ymin + height / 2.
@@ -107,4 +108,28 @@ def decode(rel_codes, anchors, scale_factors=True):
     xmin = xcenter - w / 2.
     ymax = ycenter + h / 2.
     xmax = xcenter + w / 2.
-    return tf.transpose(tf.stack([ymin, xmin, ymax, xmax]))
+    return tf.transpose(tf.stack([xmin, ymin, xmax, ymax]))
+
+def batch_decode(box_encodings, anchors):
+    """Decodes a batch of box encodings with respect to the anchors.
+
+    Args:
+      box_encodings: A float32 tensor of shape
+        [batch_size, num_anchors, box_code_size] containing box encodings.
+
+    Returns:
+      decoded_boxes: A float32 tensor of shape
+        [batch_size, num_anchors, 4] containing the decoded boxes.
+    """
+    combined_shape = shape_utils.combined_static_and_dynamic_shape(
+        box_encodings)
+    batch_size = combined_shape[0]
+    tiled_anchor_boxes = tf.tile(
+        tf.expand_dims(anchors, 0), [batch_size, 1, 1])
+    tiled_anchors = tf.reshape(tiled_anchor_boxes, [-1, 4])
+    decoded_boxes = decode(
+        tf.reshape(box_encodings, [-1, 4]),
+        tiled_anchors)
+    decoded_boxes = tf.reshape(decoded_boxes, tf.stack(
+        [combined_shape[0], combined_shape[1], 4]))
+    return decoded_boxes

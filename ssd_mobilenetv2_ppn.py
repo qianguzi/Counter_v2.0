@@ -15,16 +15,16 @@ tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish'
 tf.app.flags.DEFINE_integer('number_of_steps', 30000,
                      'Number of training steps to perform before stopping')
 tf.app.flags.DEFINE_integer('image_size', 320, 'Input image resolution')
-tf.app.flags.DEFINE_float('depth_multiplier', 0.75, 'Depth multiplier for mobilenet')
-tf.app.flags.DEFINE_float('learning_rate', 0.0001, 'learning rate for detection model')
+tf.app.flags.DEFINE_float('depth_multiplier', 1.0, 'Depth multiplier for mobilenet')
+tf.app.flags.DEFINE_float('learning_rate', 0.001, 'learning rate for detection model')
 tf.app.flags.DEFINE_string('fine_tune_checkpoint',
-                    '/home/jun/mynb/count/model.ckpt-482',
+                    None,
                     'Checkpoint from which to start finetuning.')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/',
                     'Directory for writing training checkpoints and logs')
 tf.app.flags.DEFINE_string('dataset_dir', '../tfrecords/train.tfrecords', 'Location of dataset')
 tf.app.flags.DEFINE_integer('log_every_n_steps', 100, 'Number of steps per log')
-tf.app.flags.DEFINE_integer('save_summaries_secs', 10,
+tf.app.flags.DEFINE_integer('save_summaries_secs', 50,
                      'How often to save summaries, secs')
 tf.app.flags.DEFINE_integer('save_interval_secs', 300,
                      'How often to save checkpoints, secs')
@@ -36,37 +36,24 @@ tf.app.flags.DEFINE_bool('is_training', True, 'train or eval')
 
 FLAGS = tf.app.flags.FLAGS
 
-_LEARNING_RATE_DECAY_FACTOR = 0.9
+_LEARNING_RATE_DECAY_FACTOR = 0.90
 
-
-def _conv_hyperparams_fn():
-  """Defines Box Predictor scope.
-
-  Returns:
-    An argument scope to use via arg_scope.
-  """
-  # Set weight_decay for weights in Conv layers.
-  with slim.arg_scope([slim.batch_norm], decay=0.997), \
-       slim.arg_scope([slim.conv2d, slim.separable_conv2d],
-                    weights_initializer=tf.truncated_normal_initializer(stddev=0.09),
-                    normalizer_fn=slim.batch_norm), \
-       slim.arg_scope([slim.conv2d], \
-                    weights_regularizer=slim.l2_regularizer(0.00004)) as s:
-    return s
+_anchors_figure = {
+  'feature_map_dims' : [(10, 10), (5, 5)],
+  'scales' : [[2.0], [1.0]],
+  'aspect_ratios' : [[1.0], [1.0]]
+}
 
 
 def build_model():
-  matcher = argmax_matcher.ArgMaxMatcher(matched_threshold=0.5,
-                                         unmatched_threshold=0.3)
-  anchors = anchor_generator.generate_anchors(feature_map_dims=[(10, 10), (5, 5), (3, 3)],
-                                              scales=[[0.95], [0.90], [0.60, 0.80]],
-                                              aspect_ratios=[[1.0], [1.0], [1.0, 1.0]])
-  box_pred = box_predictor.SSDBoxPredictor(
-        FLAGS.is_training, FLAGS.num_classes, box_code_size=4, 
-        conv_hyperparams_fn = _conv_hyperparams_fn)
   g = tf.Graph()
   with g.as_default(), tf.device(
       tf.train.replica_device_setter(FLAGS.ps_tasks)):
+    matcher = argmax_matcher.ArgMaxMatcher(matched_threshold=0.5,
+                                         unmatched_threshold=0.4)
+    anchors = anchor_generator.generate_anchors(**_anchors_figure)
+    box_pred = box_predictor.SSDBoxPredictor(
+      FLAGS.is_training, FLAGS.num_classes, box_code_size=4)
     batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                      else tf.GraphKeys.UPDATE_OPS)
     img_batch, bbox_batch, num_batch, _ = data_ops.get_batch(FLAGS.dataset_dir,
@@ -83,18 +70,23 @@ def build_model():
           final_endpoint='layer_18',
           depth_multiplier=FLAGS.depth_multiplier,
           finegrain_classification_mode=True)
+
+      scales = _anchors_figure['scales']
       feature_maps = feature_map_generator.pooling_pyramid_feature_maps(
           base_feature_map_depth=0,
-          num_layers=3,
+          num_layers=len(scales),
           image_features={  
               'image_features': image_features['layer_18']
           })
-      pred_dict = box_pred.predict(feature_maps.values(), [1, 1, 2])
+      
+      pred_dict = box_pred.predict(feature_maps.values(),
+                                  [len(scales[0]), len(scales[1])])
       box_encodings = tf.concat(pred_dict['box_encodings'], axis=1)
       if box_encodings.shape.ndims == 4 and box_encodings.shape[2] == 1:
         box_encodings = tf.squeeze(box_encodings, axis=2)
       class_predictions_with_background = tf.concat(
           pred_dict['class_predictions_with_background'], axis=1)
+
     total_loss = loss_op.loss(box_encodings, class_predictions_with_background,
                      bbox_batch, anchors, matcher, num_batch)
     # Configure the learning rate using an exponential decay.
@@ -108,7 +100,7 @@ def build_model():
         tf.train.get_or_create_global_step(), 
         decay_steps,
         _LEARNING_RATE_DECAY_FACTOR,
-        staircase=False)
+        staircase=True)
 
     opt = tf.train.AdamOptimizer(learning_rate)
     train_tensor = slim.learning.create_train_op(
@@ -124,7 +116,7 @@ def get_checkpoint_init_fn():
   """Returns the checkpoint init_fn if the checkpoint is provided."""
   if FLAGS.fine_tune_checkpoint:
     variables_to_restore = slim.get_variables_to_restore()
-    global_step_reset = tf.assign(tf.train.get_or_create_global_step(), 0)
+    #global_step_reset = tf.assign(tf.train.get_or_create_global_step(), 0)
     # When restoring from a floating point model, the min/max values for
     # quantized weights and activations are not present.
     # We instruct slim to ignore variables that are missing during restoration
@@ -139,7 +131,7 @@ def get_checkpoint_init_fn():
       # If we are restoring from a floating point model, we need to initialize
       # the global step to zero for the exponential decay to result in
       # reasonable learning rates.
-      sess.run(global_step_reset)
+      #sess.run(global_step_reset)
     return init_fn
   else:
     return None

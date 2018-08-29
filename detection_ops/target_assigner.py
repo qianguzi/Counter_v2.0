@@ -14,7 +14,7 @@ def area(boxlist, scope=None):
     a tensor with shape [N] representing box areas.
   """
   with tf.name_scope(scope, 'Area'):
-    y_min, x_min, y_max, x_max = tf.split(
+    x_min, y_min, x_max, y_max = tf.split(
         value=boxlist, num_or_size_splits=4, axis=1)
     return tf.squeeze((y_max - y_min) * (x_max - x_min), [1])
 
@@ -31,9 +31,9 @@ def intersection(boxlist1, boxlist2, scope=None):
     a tensor with shape [N, M] representing pairwise intersections
   """
   with tf.name_scope(scope, 'Intersection'):
-    y_min1, x_min1, y_max1, x_max1 = tf.split(
+    x_min1, y_min1, x_max1, y_max1 = tf.split(
         value=boxlist1, num_or_size_splits=4, axis=1)
-    y_min2, x_min2, y_max2, x_max2 = tf.split(
+    x_min2, y_min2, x_max2, y_max2 = tf.split(
         value=boxlist2, num_or_size_splits=4, axis=1)
     all_pairs_min_ymax = tf.minimum(y_max1, tf.transpose(y_max2))
     all_pairs_max_ymin = tf.maximum(y_min1, tf.transpose(y_min2))

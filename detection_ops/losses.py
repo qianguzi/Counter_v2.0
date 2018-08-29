@@ -31,7 +31,7 @@ from abc import abstractmethod
 
 import tensorflow as tf
 
-from detection_ops.utils import ops
+from detection_ops.utils import ops, shape_utils
 
 slim = tf.contrib.slim
 
@@ -413,11 +413,11 @@ class HardExampleMiner(object):
 
   def __init__(self,
                num_hard_examples=64,
-               iou_threshold=0.7,
+               iou_threshold=1.0,
                loss_type='both',
-               cls_loss_weight=0.05,
+               cls_loss_weight=0.08,
                loc_loss_weight=0.06,
-               max_negatives_per_positive=None,
+               max_negatives_per_positive=1.0,
                min_negatives_per_image=0):
     """Constructor.
 
@@ -516,8 +516,7 @@ class HardExampleMiner(object):
                        'length=len(decoded_boxlist_list).')
     num_positives_list = []
     num_negatives_list = []
-    for ind, detection_boxlist in enumerate(decoded_boxlist_list):
-      box_locations = detection_boxlist.get()
+    for ind, box_locations in enumerate(decoded_boxlist_list):
       match = match_list[ind]
       image_losses = cls_losses[ind]
       if self._loss_type == 'loc':
@@ -528,7 +527,9 @@ class HardExampleMiner(object):
       if self._num_hard_examples is not None:
         num_hard_examples = self._num_hard_examples
       else:
-        num_hard_examples = detection_boxlist.num_boxes()
+        combined_shape = shape_utils.combined_static_and_dynamic_shape(
+          box_locations)
+        num_hard_examples = combined_shape[0]
       selected_indices = tf.image.non_max_suppression(
           box_locations, image_losses, num_hard_examples, self._iou_threshold)
       if self._max_negatives_per_positive is not None and match:

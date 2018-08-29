@@ -1,30 +1,30 @@
-import os, cv2
+import os, cv2, loss_op
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
-
+from detection_ops import target_assigner
 from detection_ops import box_coder
 from mobilenet import mobilenet_v2
 from detection_ops.utils import shape_utils, data_ops
-from detection_ops import feature_map_generator, box_predictor, anchor_generator
+from detection_ops import feature_map_generator, box_predictor, anchor_generator, argmax_matcher
 
 tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
 tf.app.flags.DEFINE_integer('batch_size', 8, 'Batch size')
 tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
 tf.app.flags.DEFINE_integer('image_size', 320, 'Input image resolution')
 tf.app.flags.DEFINE_integer('num_examples', 6000, 'the number of examples')
-tf.app.flags.DEFINE_float('depth_multiplier', 1.0, 'Depth multiplier for mobilenet')
+tf.app.flags.DEFINE_float('depth_multiplier', 0.75, 'Depth multiplier for mobilenet')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/',
                     'Directory for writing training checkpoints and logs')
-tf.app.flags.DEFINE_string('dataset_dir', '../tfrecords/train.tfrecords', 'Location of dataset')
+tf.app.flags.DEFINE_string('dataset_dir', '../tfrecords/test.tfrecords', 'Location of dataset')
 tf.app.flags.DEFINE_string('imwrite_dir', '/media/jun/data/capdataset/detect/result/',
                     'Location of result_imgs')
-tf.app.flags.DEFINE_bool('freeze_batchnorm', True,
+tf.app.flags.DEFINE_bool('freeze_batchnorm', False,
                      'Whether to freeze batch norm parameters during training or not')
 tf.app.flags.DEFINE_bool('inplace_batchnorm_update', True,
                      'Whether to update batch norm moving average values inplace')
 tf.app.flags.DEFINE_bool('is_training', False, 'train or eval')
-tf.app.flags.DEFINE_integer('max_output_size', 125, 'Max_output_size')
+tf.app.flags.DEFINE_integer('max_output_size', 200, 'Max_output_size')
 tf.app.flags.DEFINE_float('iou_threshold', 0.0, 'iou_threshold')
 tf.app.flags.DEFINE_float('score_threshold', 0.0, 'score_threshold')
 
@@ -35,7 +35,6 @@ _anchors_figure = {
   'scales' : [[2.0], [1.0]],
   'aspect_ratios' : [[1.0], [1.0]]
 }
-
 
 def _batch_decode(box_encodings, anchors):
     """Decodes a batch of box encodings with respect to the anchors.
@@ -125,8 +124,7 @@ def postprocess(anchors, box_encodings,
       detection_dict = {
           'detection_boxes': detection_boxes,
           'detection_scores': detection_scores,
-          'num_detections': num_detections,
-          'detection_scores_with_background': detection_scores_with_background
+          'num_detections': num_detections
       }
 
       return detection_dict
@@ -138,9 +136,13 @@ def build_model():
     anchors = anchor_generator.generate_anchors(**_anchors_figure)
     box_pred = box_predictor.SSDBoxPredictor(
         FLAGS.is_training, FLAGS.num_classes, box_code_size=4)
+    matcher = argmax_matcher.ArgMaxMatcher(matched_threshold=0.5,
+                                          unmatched_threshold=0.25,
+                                          negatives_lower_than_unmatched=True,
+                                          force_match_for_each_row=True)
     batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                      else tf.GraphKeys.UPDATE_OPS)
-    img_batch, _, _, name_batch = data_ops.get_batch(FLAGS.dataset_dir, 8)
+    img_batch, bbox_batch, num_batch, name_batch = data_ops.get_batch(FLAGS.dataset_dir, 8)
     preimg_batch = tf.cast(img_batch, tf.float32) / 127.5 - 1
     anchors = tf.convert_to_tensor(anchors, dtype=tf.float32, name='anchors')
     with slim.arg_scope([slim.batch_norm],
@@ -165,9 +167,11 @@ def build_model():
         box_encodings = tf.squeeze(box_encodings, axis=2)
       class_predictions_with_background = tf.concat(
           pred_dict['class_predictions_with_background'], axis=1)
+    total_loss = loss_op.loss(
+      box_encodings, class_predictions_with_background, bbox_batch, anchors, matcher, num_batch)
     detection_dict = postprocess(anchors, box_encodings,
                                 class_predictions_with_background)
-  return g, img_batch, name_batch, detection_dict
+  return g, img_batch, name_batch, total_loss
 
 
 def load(sess, saver, checkpoint_dir):
@@ -203,9 +207,33 @@ def draw_and_save(imgs, names, bboxes, scores, nums):
                         cv2.FONT_HERSHEY_COMPLEX, 0.3, (0, 0, 255), 1)
         cv2.imwrite(FLAGS.imwrite_dir + str(names[n]) + '_result.jpg', color_img)
 
+def _debug():
+  g = tf.Graph()
+  with g.as_default(), tf.device(
+      tf.train.replica_device_setter(FLAGS.ps_tasks)):
+    anchors = anchor_generator.generate_anchors(feature_map_dims=[(10, 10), (5, 5)],
+                                                scales=[[2.0], [1.0]],
+                                                aspect_ratios=[[1.0], [1.0]])
+
+    img_batch, bbox_batch, num_batch, name_batch = data_ops.get_batch(FLAGS.dataset_dir, 8)
+
+    anchors = tf.convert_to_tensor(anchors, dtype=tf.float32, name='anchors')
+    iou_list = []
+    gt_boxes_list = []
+    matched_list = []
+    for i in range(FLAGS.batch_size):
+      gt_boxes = bbox_batch[i][:num_batch[i]]
+      gt_boxes = tf.identity(gt_boxes, name='gt_boxes')
+      iou= target_assigner.iou(gt_boxes, anchors)
+      matched_vals = tf.reduce_max(iou, 0)
+      iou_list.append(iou)
+      gt_boxes_list.append(gt_boxes)
+      matched_list.append(matched_vals)
+
+  return g, img_batch, name_batch, iou_list, gt_boxes_list, anchors, matched_list
 
 def test_model():
-    g, img_batch, name_batch, detection_dict = build_model()
+    g, img_batch, name_batch, total_loss = build_model()
     with g.as_default():
       init_op = tf.group(tf.global_variables_initializer(),
                        tf.local_variables_initializer())
@@ -214,18 +242,18 @@ def test_model():
         coord = tf.train.Coordinator()
         threads = tf.train.start_queue_runners(sess=sess, coord=coord)
         # saver for restore model
-        saver = tf.train.Saver()
-        print('[*] Try to load trained model...')
-        ckpt_name = load(sess, saver, FLAGS.checkpoint_dir)
+        #saver = tf.train.Saver()
+        #print('[*] Try to load trained model...')
+        #ckpt_name = load(sess, saver, FLAGS.checkpoint_dir)
 
         max_steps = int(FLAGS.num_examples / FLAGS.batch_size)
         print('START TESTING...')
         for i in range(max_steps):
           # test
-          imgs, names, detec= sess.run([img_batch, name_batch, 
-                                                detection_dict])
-          draw_and_save(imgs, names, detec['detection_boxes'],
-                        detec['detection_scores'], detec['num_detections'])
+          imgs, names, loss= sess.run([img_batch, name_batch,
+                                       total_loss])
+          print('..')
+          #draw_and_save(imgs, names, bboxes, scores, nums)
         coord.request_stop()
         coord.join(threads)
         print('FINISHED TESTING.')
