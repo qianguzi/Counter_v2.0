@@ -84,7 +84,7 @@ def minibatch_subsample_fn(inputs):
     random_example_sampler = sampler.BalancedPositiveNegativeSampler()
     return random_example_sampler.subsample(
         tf.cast(cls_weights, tf.bool),
-        batch_size=64,
+        batch_size=72,
         labels=tf.cast(positives_indicator, tf.bool))
 
 def loss(box_encodings, class_predictions_with_background, 
@@ -126,7 +126,9 @@ def loss(box_encodings, class_predictions_with_background,
                   scope='cls_loss',
                   weights=batch_cls_weights),
           ndims=2)
-      hard_example_miner = HardExampleMiner()
+      hard_example_miner = HardExampleMiner(num_hard_examples=48,
+                                            cls_loss_weight=1.5,
+                                            loc_loss_weight=0.5)
       (localization_loss, classification_loss) = apply_hard_mining(
         location_losses, cls_losses, box_encodings, anchors, match_list, hard_example_miner)
       if add_summaries:
@@ -140,12 +142,15 @@ def loss(box_encodings, class_predictions_with_background,
       localization_loss_normalizer = normalizer
       if normalize_loc_loss_by_codesize:
         localization_loss_normalizer *= 4
-      localization_loss = tf.multiply((1 / localization_loss_normalizer),
+      localization_loss = tf.multiply((0.8 / localization_loss_normalizer),
                                       localization_loss,
                                       name='localization_loss')
-      classification_loss = tf.multiply((1 / normalizer), 
+      classification_loss = tf.multiply((1.2 / normalizer), 
                                         classification_loss,
                                         name='classification_loss')
 
-      total_loss = localization_loss + classification_loss
-  return total_loss
+      loss_dict = {
+          str(localization_loss.op.name): localization_loss,
+          str(classification_loss.op.name): classification_loss
+      }
+  return loss_dict

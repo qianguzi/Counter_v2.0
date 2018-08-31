@@ -55,7 +55,7 @@ class ArgMaxMatcher(matcher.Matcher):
                matched_threshold,
                unmatched_threshold=None,
                negatives_lower_than_unmatched=True,
-               force_match_for_each_row=True,
+               force_match_for_each_row=False,
                use_matmul_gather=False):
     """Construct ArgMaxMatcher.
 

@@ -16,7 +16,7 @@ tf.app.flags.DEFINE_integer('number_of_steps', 30000,
                      'Number of training steps to perform before stopping')
 tf.app.flags.DEFINE_integer('image_size', 320, 'Input image resolution')
 tf.app.flags.DEFINE_float('depth_multiplier', 1.0, 'Depth multiplier for mobilenet')
-tf.app.flags.DEFINE_float('learning_rate', 0.001, 'learning rate for detection model')
+tf.app.flags.DEFINE_float('learning_rate', 0.002, 'learning rate for detection model')
 tf.app.flags.DEFINE_string('fine_tune_checkpoint',
                     None,
                     'Checkpoint from which to start finetuning.')
@@ -28,7 +28,7 @@ tf.app.flags.DEFINE_integer('save_summaries_secs', 50,
                      'How often to save summaries, secs')
 tf.app.flags.DEFINE_integer('save_interval_secs', 300,
                      'How often to save checkpoints, secs')
-tf.app.flags.DEFINE_bool('freeze_batchnorm', False,
+tf.app.flags.DEFINE_bool('freeze_batchnorm', True,
                      'Whether to freeze batch norm parameters during training or not')
 tf.app.flags.DEFINE_bool('inplace_batchnorm_update', True,
                      'Whether to update batch norm moving average values inplace')
@@ -36,7 +36,7 @@ tf.app.flags.DEFINE_bool('is_training', True, 'train or eval')
 
 FLAGS = tf.app.flags.FLAGS
 
-_LEARNING_RATE_DECAY_FACTOR = 0.90
+_LEARNING_RATE_DECAY_FACTOR = 0.95
 
 _anchors_figure = {
   'feature_map_dims' : [(10, 10), (5, 5)],
@@ -87,10 +87,13 @@ def build_model():
       class_predictions_with_background = tf.concat(
           pred_dict['class_predictions_with_background'], axis=1)
 
-    total_loss = loss_op.loss(box_encodings, class_predictions_with_background,
+    losses_dict = loss_op.loss(box_encodings, class_predictions_with_background,
                      bbox_batch, anchors, matcher, num_batch)
+    for loss_tensor in losses_dict.values():
+      tf.losses.add_loss(loss_tensor)
+    update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+
     # Configure the learning rate using an exponential decay.
-    total_loss = tf.identity(total_loss, name='total_loss')
     num_epochs_per_decay = 2
     imagenet_size = 5400
     decay_steps = int(imagenet_size / FLAGS.batch_size * num_epochs_per_decay)
@@ -103,10 +106,30 @@ def build_model():
         staircase=True)
 
     opt = tf.train.AdamOptimizer(learning_rate)
-    train_tensor = slim.learning.create_train_op(
-        total_loss,
-        optimizer=opt)
 
+    total_losses = []
+    cls_loc_losses = tf.get_collection(tf.GraphKeys.LOSSES)
+    cls_loc_loss = tf.add_n(cls_loc_losses, name='cls_loc_loss')
+    total_losses.append(cls_loc_loss)
+    regularization_losses = tf.get_collection(
+        tf.GraphKeys.REGULARIZATION_LOSSES)
+    regularization_loss = tf.add_n(regularization_losses,
+                                     name='regularization_loss')
+    total_losses.append(regularization_loss)
+    total_loss = tf.add_n(total_losses, name='total_loss')
+
+    grads_and_vars = opt.compute_gradients(total_loss)
+
+    total_loss = tf.check_numerics(total_loss, 'LossTensor is inf or nan.')
+    grad_updates = opt.apply_gradients(grads_and_vars,
+                                      global_step=tf.train.get_or_create_global_step())
+    update_ops.append(grad_updates)
+    update_op = tf.group(*update_ops, name='update_barrier')
+    with tf.control_dependencies([update_op]):
+      train_tensor = tf.identity(total_loss, name='train_op')
+
+  slim.summaries.add_scalar_summary(cls_loc_loss, 'cls_loc_loss', 'losses')
+  slim.summaries.add_scalar_summary(regularization_loss, 'regularization_loss', 'losses')
   slim.summaries.add_scalar_summary(total_loss, 'total_loss', 'losses')
   slim.summaries.add_scalar_summary(learning_rate, 'learning_rate', 'training')
   return g, train_tensor
@@ -116,7 +139,7 @@ def get_checkpoint_init_fn():
   """Returns the checkpoint init_fn if the checkpoint is provided."""
   if FLAGS.fine_tune_checkpoint:
     variables_to_restore = slim.get_variables_to_restore()
-    #global_step_reset = tf.assign(tf.train.get_or_create_global_step(), 0)
+    global_step_reset = tf.assign(tf.train.get_or_create_global_step(), 0)
     # When restoring from a floating point model, the min/max values for
     # quantized weights and activations are not present.
     # We instruct slim to ignore variables that are missing during restoration
@@ -131,7 +154,7 @@ def get_checkpoint_init_fn():
       # If we are restoring from a floating point model, we need to initialize
       # the global step to zero for the exponential decay to result in
       # reasonable learning rates.
-      #sess.run(global_step_reset)
+      sess.run(global_step_reset)
     return init_fn
   else:
     return None
