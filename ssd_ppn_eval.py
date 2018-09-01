@@ -16,7 +16,7 @@ tf.app.flags.DEFINE_integer('num_examples', 6000, 'the number of examples')
 tf.app.flags.DEFINE_float('depth_multiplier', 1.0, 'Depth multiplier for mobilenet')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/',
                     'Directory for writing training checkpoints and logs')
-tf.app.flags.DEFINE_string('dataset_dir', '../tfrecords/train.tfrecords', 'Location of dataset')
+tf.app.flags.DEFINE_string('dataset_dir', '../tfrecords/test.tfrecords', 'Location of dataset')
 tf.app.flags.DEFINE_string('imwrite_dir', '/media/jun/data/capdataset/detect/result/',
                     'Location of result_imgs')
 tf.app.flags.DEFINE_bool('freeze_batchnorm', True,
@@ -25,7 +25,7 @@ tf.app.flags.DEFINE_bool('inplace_batchnorm_update', True,
                      'Whether to update batch norm moving average values inplace')
 tf.app.flags.DEFINE_bool('is_training', False, 'train or eval')
 tf.app.flags.DEFINE_integer('max_output_size', 125, 'Max_output_size')
-tf.app.flags.DEFINE_float('iou_threshold', 0.0, 'iou_threshold')
+tf.app.flags.DEFINE_float('iou_threshold', 0.5, 'iou_threshold')
 tf.app.flags.DEFINE_float('score_threshold', 0.0, 'score_threshold')
 
 FLAGS = tf.app.flags.FLAGS

@@ -1,29 +1,14 @@
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
-import matplotlib; matplotlib.use('Agg')  # pylint: disable=multiple-statements
-import matplotlib.pyplot as plt  # pylint: disable=g-import-not-at-top
 
 from detection_ops.utils import shape_utils
 from detection_ops import target_assigner, box_coder, minibatch_sampler
 from detection_ops import balanced_positive_negative_sampler as sampler
-from detection_ops.utils.visualization_utils import add_cdf_image_summary
 from detection_ops.losses import Loss, WeightedSmoothL1LocalizationLoss, WeightedSoftmaxClassificationLoss, HardExampleMiner
 
 def reduce_sum_trailing_dimensions(tensor, ndims):
   """Computes sum across all dimensions following first `ndims` dimensions."""
   return tf.reduce_sum(tensor, axis=tuple(range(ndims, tensor.shape.ndims)))
-
-def summarize_anchor_classification_loss(class_ids, cls_losses):
-    positive_indices = tf.where(tf.greater(class_ids, 0))
-    positive_anchor_cls_loss = tf.squeeze(
-        tf.gather(cls_losses, positive_indices), axis=1)
-    add_cdf_image_summary(positive_anchor_cls_loss,
-                                              'PositiveAnchorLossCDF')
-    negative_indices = tf.where(tf.equal(class_ids, 0))
-    negative_anchor_cls_loss = tf.squeeze(
-        tf.gather(cls_losses, negative_indices), axis=1)
-    add_cdf_image_summary(negative_anchor_cls_loss,
-                                              'NegativeAnchorLossCDF')
 
 def apply_hard_mining(location_losses, cls_losses, box_encodings,
                          anchors, match_list, hard_example_miner):
