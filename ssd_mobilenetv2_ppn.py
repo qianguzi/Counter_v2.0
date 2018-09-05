@@ -183,7 +183,7 @@ def train_model():
         save_interval_secs=FLAGS.save_interval_secs,
         init_fn=get_checkpoint_init_fn(),
         global_step=tf.train.get_global_step(),
-        saver=tf.train.Saver(max_to_keep=100))
+        saver=tf.train.Saver(max_to_keep=150))
 
 
 def main(unused_arg):
