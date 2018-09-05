@@ -73,7 +73,7 @@ def minibatch_subsample_fn(inputs):
         labels=tf.cast(positives_indicator, tf.bool))
 
 def loss(box_encodings, class_predictions_with_background, 
-         bbox_batch, anchors, matcher, num_batch,
+         bbox_batch, anchors, matcher,
          add_summaries=True,
          normalize_loss_by_num_matches=True,
          normalize_loc_loss_by_codesize=True,
@@ -81,11 +81,11 @@ def loss(box_encodings, class_predictions_with_background,
          scope=None):
   """Compute scalar loss tensors with respect to provided groundtruth."""
   with tf.name_scope(scope, 'Loss', [box_encodings, class_predictions_with_background,
-                     bbox_batch, anchors, matcher, num_batch]):
+                     bbox_batch, anchors, matcher]):
       (batch_cls_targets, batch_cls_weights, batch_reg_targets,
           batch_reg_weights, match_list)= target_assigner.target_assign(
                                               bbox_batch, anchors,
-                                              matcher, num_batch)
+                                              matcher)
       if random_example:
         batch_sampled_indicator = tf.to_float(
             shape_utils.static_or_dynamic_map_fn(
@@ -111,9 +111,9 @@ def loss(box_encodings, class_predictions_with_background,
                   scope='cls_loss',
                   weights=batch_cls_weights),
           ndims=2)
-      hard_example_miner = HardExampleMiner(num_hard_examples=48,
-                                            cls_loss_weight=1.5,
-                                            loc_loss_weight=0.5)
+      hard_example_miner = HardExampleMiner(num_hard_examples=64,
+                                            cls_loss_weight=1.0,
+                                            loc_loss_weight=0.8)
       (localization_loss, classification_loss) = apply_hard_mining(
         location_losses, cls_losses, box_encodings, anchors, match_list, hard_example_miner)
       if add_summaries:
@@ -127,10 +127,10 @@ def loss(box_encodings, class_predictions_with_background,
       localization_loss_normalizer = normalizer
       if normalize_loc_loss_by_codesize:
         localization_loss_normalizer *= 4
-      localization_loss = tf.multiply((0.8 / localization_loss_normalizer),
+      localization_loss = tf.multiply((1 / localization_loss_normalizer),
                                       localization_loss,
                                       name='localization_loss')
-      classification_loss = tf.multiply((1.2 / normalizer), 
+      classification_loss = tf.multiply((1 / normalizer), 
                                         classification_loss,
                                         name='classification_loss')
 

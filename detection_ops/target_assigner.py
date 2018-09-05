@@ -70,7 +70,6 @@ def assign(gt_boxes, anchors,
            matcher,
            gt_labels=None,
            gt_weights=None):
-  gt_boxes = tf.identity(gt_boxes, name='gt_boxes')
   num_batch = shape_utils.combined_static_and_dynamic_shape(gt_boxes)
   if gt_labels is None:
     gt_labels = tf.ones([num_batch[0]], dtype=tf.float32)
@@ -81,15 +80,11 @@ def assign(gt_boxes, anchors,
   
   match_quality_matrix = iou(gt_boxes, anchors)
   match = matcher.match(match_quality_matrix)
-  reg_targets = create_regression_targets(anchors,
-                                           gt_boxes,
-                                           match)
-  cls_targets = create_classification_targets(gt_labels,
-                                               match)
+  reg_targets = create_regression_targets(anchors, gt_boxes, match)
+  cls_targets = create_classification_targets(gt_labels, match)
   reg_weights = create_regression_weights(match, gt_weights)
-  cls_weights = create_classification_weights(match,
-                                               gt_weights)
-  #print(reg_targets, cls_targets, reg_weights, cls_weights)
+  cls_weights = create_classification_weights(match, gt_weights)
+
   num_anchors = anchors.get_shape()[0].value
   if num_anchors is not None:
     reg_targets = reset_target_shape(reg_targets, num_anchors)
@@ -226,17 +221,15 @@ def create_classification_weights(match,
         unmatched_value=1.0)
 
 def target_assign(bbox_batch, anchors,
-                  matcher, num_batch):
+                  matcher):
   cls_targets_list = []
   cls_weights_list = []
   reg_targets_list = []
   reg_weights_list = []
   match_list = []
-  batch_size = shape_utils.combined_static_and_dynamic_shape(num_batch)[0]
-  for i in range(batch_size):
+  for gt_boxes in bbox_batch:
     (cls_targets, cls_weights, reg_targets,
-     reg_weights, match) = assign(bbox_batch[i][:num_batch[i]], anchors,
-                                  matcher)
+     reg_weights, match) = assign(gt_boxes, anchors, matcher)
     cls_targets_list.append(cls_targets)
     cls_weights_list.append(cls_weights)
     reg_targets_list.append(reg_targets)
@@ -246,6 +239,6 @@ def target_assign(bbox_batch, anchors,
   batch_cls_weights = tf.stack(cls_weights_list)
   batch_reg_targets = tf.stack(reg_targets_list)
   batch_reg_weights = tf.stack(reg_weights_list)
-  #print(batch_cls_targets)
+
   return (batch_cls_targets, batch_cls_weights, batch_reg_targets,
           batch_reg_weights, match_list)

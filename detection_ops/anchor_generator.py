@@ -107,10 +107,21 @@ def generate_anchors(feature_map_dims, scales, aspect_ratios):
                                  anchor_stride=stride,
                                  anchor_offset=offset)
     anchor_grid_list.append(tiled_anchors)
-  anchor_grid_list = np.concatenate(anchor_grid_list, 0)
-  return anchor_grid_list
+  anchors = np.concatenate(anchor_grid_list, 0)
+  return anchors
 
 
 if __name__ =='__main__':
-  anchors = generate_anchors([(7,7),(4,4)], scales=[[0.5,0.8], [0.5,0.8]], aspect_ratios=[[1,1],[1,1]])
-  print(anchors)
+  import os, cv2
+  img_dir = '/media/jun/data/capdataset/detect/train_256/test_anchors/'
+  anchors = generate_anchors([(4,4)], scales=[[0.8]], aspect_ratios=[[1]])
+  anchors = (anchors*256).astype(np.int)
+  for img_name in os.listdir(img_dir):
+    img = cv2.imread(img_dir+img_name, 0)
+    img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    for bbox in anchors:
+        cv2.rectangle(img,
+                    (bbox[0], bbox[1]),
+                    (bbox[2], bbox[3]),
+                    (0, 255, 0), 1)
+    cv2.imwrite(img_dir+'result'+img_name, img)
