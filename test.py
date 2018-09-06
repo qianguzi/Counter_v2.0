@@ -13,14 +13,14 @@ tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
 tf.app.flags.DEFINE_integer('split_row', 6, 'num of row')
 tf.app.flags.DEFINE_integer('split_col', 5, 'num of col')
 tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
-tf.app.flags.DEFINE_integer('image_size', 320, 'Input image resolution')
+tf.app.flags.DEFINE_integer('image_size', 256, 'Input image resolution')
 tf.app.flags.DEFINE_float('depth_multiplier', 1.0,
                           'Depth multiplier for mobilenet')
-tf.app.flags.DEFINE_string('checkpoint_dir', '/home/myfile/checkpoints/',
+tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/checkpoints/',
                            'Directory for writing training checkpoints and logs')
-tf.app.flags.DEFINE_string('dataset_dir', '/media/jun/data/capdataset/detection/test/',
+tf.app.flags.DEFINE_string('dataset_dir', '../dataset/',
                            'Location of dataset')
-tf.app.flags.DEFINE_string('imwrite_dir', '/media/jun/data/capdataset/detection/result_test/',
+tf.app.flags.DEFINE_string('imwrite_dir', '../dataset/result/',
                            'Location of result_imgs')
 tf.app.flags.DEFINE_bool('freeze_batchnorm', False,
                          'Whether to freeze batch norm parameters during training or not')
@@ -33,12 +33,16 @@ tf.app.flags.DEFINE_float('score_threshold', 0.7, 'score_threshold')
 
 FLAGS = tf.app.flags.FLAGS
 
+#_anchors_figure = {
+#    'feature_map_dims': [(10, 10), (5, 5)],
+#    'scales': [[2.0], [1.0]],
+#    'aspect_ratios': [[1.0], [1.0]]
+#}
 _anchors_figure = {
-    'feature_map_dims': [(10, 10), (5, 5)],
-    'scales': [[2.0], [1.0]],
+    'feature_map_dims': [(8, 8), (4, 4)],
+    'scales': [[1.6], [0.8]],
     'aspect_ratios': [[1.0], [1.0]]
 }
-
 
 def postprocess(anchors, box_encodings,
                 class_predictions_with_background,
@@ -104,7 +108,8 @@ def build_model():
             FLAGS.is_training, FLAGS.num_classes, box_code_size=4)
         batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                          else tf.GraphKeys.UPDATE_OPS)
-        img_batch = tf.placeholder(tf.int32, [None, 320, 320, 3], 'inputs')
+        img_batch = tf.placeholder(
+            tf.int32, [None, FLAGS.image_size, FLAGS.image_size, 3], 'inputs')
         preimg_batch = tf.cast(img_batch, tf.float32) / 127.5 - 1
         anchors = tf.convert_to_tensor(
                 anchors, dtype=tf.float32, name='anchors')
@@ -174,28 +179,28 @@ def test_model():
             ckpt_name = load(sess, saver, FLAGS.checkpoint_dir)
 
             print('START TESTING...')
-            input_imgs = {img_path[:-4]: cv2.imread(FLAGS.dataset_dir + img_path, 0)
-                          for img_path in os.listdir(FLAGS.dataset_dir)}
-            for img_name in input_imgs:
-                img = input_imgs[img_name]
-                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-                split_imgs, clip_select = img_grid_split(
-                    img, FLAGS.split_row, FLAGS.split_col, FLAGS.image_size/2)
-                split_locs = np.tile(clip_select[:, :2], 2)
-                detec = sess.run(detection_dict, {img_batch: split_imgs})
+            with open(FLAGS.dataset_dir+'name.txt', 'r+') as f:
+                for name in f.readlines():
+                    name = name.strip('\n') + '_resize'
+                    img = cv2.imread(FLAGS.dataset_dir+'img/'+name+'.jpg', 0)
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                    split_imgs, clip_select = img_grid_split(
+                        img, FLAGS.split_row, FLAGS.split_col, FLAGS.image_size/2)
+                    split_locs = np.tile(clip_select[:, :2], 2)
+                    detec = sess.run(detection_dict, {img_batch: split_imgs})
 
-                boxes_list = []
-                scores_list = []
-                for split_boxes, split_scores, split_loc in zip(
-                        detec['detection_boxes'], detec['detection_scores'], split_locs):
-                    if split_boxes.shape[0]:
-                        split_boxes = (split_boxes * FLAGS.image_size).astype(int) + split_loc
-                        boxes_list.append(split_boxes)
-                        scores_list.append(split_scores)
-                boxes = np.concatenate(boxes_list)
-                scores = np.concatenate(scores_list)
-                #boxes, scores = nms(boxes, scores, max_out=60)
-                draw_and_save(img, img_name, boxes, scores)
+                    boxes_list = []
+                    scores_list = []
+                    for split_boxes, split_scores, split_loc in zip(
+                            detec['detection_boxes'], detec['detection_scores'], split_locs):
+                        if split_boxes.shape[0]:
+                            split_boxes = (split_boxes * FLAGS.image_size).astype(int) + split_loc
+                            boxes_list.append(split_boxes)
+                            scores_list.append(split_scores)
+                    boxes = np.concatenate(boxes_list)
+                    scores = np.concatenate(scores_list)
+                    #boxes, scores = nms(boxes, scores, max_out=60)
+                    draw_and_save(img, img_name, boxes, scores)
             coord.request_stop()
             coord.join(threads)
             print('FINISHED TESTING.')

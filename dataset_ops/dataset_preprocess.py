@@ -23,7 +23,7 @@ def img_resize(img, img_boxes, size):
   newimg_boxes = {}
   for box_name in img_boxes:
     box = np.multiply(img_boxes[box_name],
-                      [size[1]/w, size[0]/h, size[1]/w, size[0]/h])
+                      [size[0]/w, size[1]/h, size[0]/w, size[1]/h])
     newimg_boxes[box_name] = box.astype(np.int).tolist()
   return newimg, newimg_boxes
 
@@ -71,13 +71,13 @@ def dataset_preprocess(imread_dir,
   with open(imread_dir+file_name, 'r+') as f:
     for name in f.readlines():
       name = name.strip('\n')
-      img = cv2.imread(imread_dir+'img/'+name+'.jpg', 0)
+      img = cv2.imread(imread_dir+'img/'+name+'.png', 0)
       boxes_flie = codecs.open(
         imread_dir+'result/'+name+'.json', 'r', encoding='utf-8').read()
       img_boxes = json.loads(boxes_flie)
 
       if resize_img:
-        newimg, newimg_boxes = img_resize(img, img_boxes, 800, 600)
+        newimg, newimg_boxes = img_resize(img, img_boxes, resize_img)
         if imwrite_dir:
           img_name = name + '_resize'
           if to_save_dataset:
@@ -101,7 +101,7 @@ def dataset_preprocess(imread_dir,
             save_resultimg(img, img_boxes, name, resultimg_dir)
 
 if __name__ == '__main__':
-  imread_dir = '/media/jun/data/capdataset/detect/train_256/'
-  imwrite_dir = '/media/jun/data/capdataset/detect/train_256/final/'
-  dataset_preprocess(imread_dir, 'flip1.txt', imwrite_dir, flip_img=(0, 1),
-                    to_save_original=True)
+  imread_dir = '/media/jun/data/capdataset/detection/test/'
+  imwrite_dir = '/media/jun/data/capdataset/detection/test_800x600/'
+  dataset_preprocess(imread_dir, 'name.txt', imwrite_dir, resize_img=(600, 800),
+                    to_save_original=False)
