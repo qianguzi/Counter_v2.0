@@ -59,7 +59,7 @@ def img_random_split(img, select_num, half_split_img_size):
     split_imgs = np.stack(split_imgs)
     return split_imgs, clip_select
 
-def img_grid_split(img, row, col, half_split_img_size):
+def img_grid_split(img, row, col, split_img_size):
     """网格裁取图片.
 
     Args:
@@ -70,8 +70,9 @@ def img_grid_split(img, row, col, half_split_img_size):
         split_imgs, clip_select: 裁取的图片以及其对应于原图的Bbox.
     """
     h, w = img.shape[:2]
-    dy = (h-half_split_img_size*2) / (row-1)
-    dx = (w-half_split_img_size*2) / (col-1)
+    half_split_img_size = int(split_img_size / 2)
+    dy = (h-split_img_size) / (row-1)
+    dx = (w-split_img_size) / (col-1)
     y = np.arange(half_split_img_size, h-half_split_img_size, dy, np.int32)
     x = np.arange(half_split_img_size, w-half_split_img_size, dx, np.int32)
     y = np.append(y, h-half_split_img_size)

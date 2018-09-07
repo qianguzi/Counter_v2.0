@@ -1,8 +1,8 @@
-import os
-import cv2
+import os, cv2
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
+from time import time
 
 from mobilenet import mobilenet_v2
 from detection_ops.utils import shape_utils
@@ -10,13 +10,15 @@ from dataset_ops.dataset_util import img_grid_split
 from detection_ops import feature_map_generator, box_coder, box_predictor, anchor_generator
 
 tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
-tf.app.flags.DEFINE_integer('split_row', 6, 'num of row')
-tf.app.flags.DEFINE_integer('split_col', 5, 'num of col')
+tf.app.flags.DEFINE_integer('split_row', 7, 'num of row')
+tf.app.flags.DEFINE_integer('split_col', 4, 'num of col')
 tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
 tf.app.flags.DEFINE_integer('image_size', 256, 'Input image resolution')
-tf.app.flags.DEFINE_float('depth_multiplier', 1.0,
+tf.app.flags.DEFINE_integer('original_image_height', 800, 'Height of the original image')
+tf.app.flags.DEFINE_integer('original_image_width', 600, 'Width of the original image')
+tf.app.flags.DEFINE_float('depth_multiplier', 0.75,
                           'Depth multiplier for mobilenet')
-tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/checkpoints/',
+tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/counter_v2/',
                            'Directory for writing training checkpoints and logs')
 tf.app.flags.DEFINE_string('dataset_dir', '../dataset/',
                            'Location of dataset')
@@ -27,11 +29,33 @@ tf.app.flags.DEFINE_bool('freeze_batchnorm', False,
 tf.app.flags.DEFINE_bool('inplace_batchnorm_update', False,
                          'Whether to update batch norm moving average values inplace')
 tf.app.flags.DEFINE_bool('is_training', False, 'train or eval')
-tf.app.flags.DEFINE_integer('max_output_size', 20, 'Max_output_size')
-tf.app.flags.DEFINE_float('iou_threshold', 0.3, 'iou_threshold')
-tf.app.flags.DEFINE_float('score_threshold', 0.7, 'score_threshold')
+tf.app.flags.DEFINE_bool('add_hough', False, 'Add hough circle detection')
+tf.app.flags.DEFINE_integer('max_output_size', 63, 'Max_output_size')
+tf.app.flags.DEFINE_float('iou_threshold', 0.0, 'iou_threshold')
+tf.app.flags.DEFINE_float('score_threshold', 0.85, 'score_threshold')
 
 FLAGS = tf.app.flags.FLAGS
+
+_convert_ratio = [
+    FLAGS.image_size/FLAGS.original_image_width,
+    FLAGS.image_size/FLAGS.original_image_height,
+    FLAGS.image_size/FLAGS.original_image_width,
+    FLAGS.image_size/FLAGS.original_image_height
+]
+
+_ratio_to_value = [
+    FLAGS.original_image_width,
+    FLAGS.original_image_height,
+    FLAGS.original_image_width,
+    FLAGS.original_image_height
+]
+
+_value_to_ratio = [
+    1/FLAGS.original_image_width,
+    1/FLAGS.original_image_height,
+    1/FLAGS.original_image_width,
+    1/FLAGS.original_image_height
+]
 
 #_anchors_figure = {
 #    'feature_map_dims': [(10, 10), (5, 5)],
@@ -44,56 +68,55 @@ _anchors_figure = {
     'aspect_ratios': [[1.0], [1.0]]
 }
 
-def postprocess(anchors, box_encodings,
+def postprocess(anchors, split_locs, box_encodings,
                 class_predictions_with_background,
                 scope=None):
     """Converts prediction tensors to final detections."""
     with tf.name_scope(scope, 'Postprocessor',
-                       [anchors, box_encodings, class_predictions_with_background]):
+            [anchors, split_locs, box_encodings, class_predictions_with_background]):
         box_encodings = tf.identity(box_encodings, 'raw_box_encodings')
         detection_boxes = box_coder.batch_decode(box_encodings, anchors)
         detection_boxes = tf.identity(detection_boxes, 'raw_box_locations')
-
+        convert_ratio = tf.constant(_convert_ratio, tf.float32, name='convert_ratio')
+        detection_boxes = tf.multiply(detection_boxes, convert_ratio) + split_locs
+        detection_boxes = tf.reshape(detection_boxes, [-1, 4])
+    
         detection_scores_with_background = tf.nn.softmax(
             class_predictions_with_background, name='softmax')
         detection_scores_with_background = tf.identity(
             detection_scores_with_background, 'raw_box_scores')
-        detection_scores = tf.slice(detection_scores_with_background, [0, 0, 1],
-                                    [-1, -1, -1])
-        detection_scores = tf.squeeze(detection_scores, 2)
+        detection_scores_with_background = tf.reshape(
+            detection_scores_with_background, [-1, FLAGS.num_classes])
+        detection_scores = tf.slice(detection_scores_with_background, [0, 1],
+                                    [-1, -1])
+        detection_scores = tf.squeeze(detection_scores, 1)
 
-        detection_boxes_list = []
-        detection_scores_list = []
-        for i in range(FLAGS.split_row * FLAGS.split_col):
-            positive_loc = tf.equal(
-                tf.argmax(detection_scores_with_background[i], 1),
-                1)
-            positive_indices = tf.cast(
-                tf.squeeze(tf.where(positive_loc), 1),
-                tf.int32)
-            detection_box = tf.gather(detection_boxes[i], positive_indices)
-            detection_score = tf.gather(detection_scores[i], positive_indices)
+        positive_locs = tf.equal(
+            tf.argmax(detection_scores_with_background, 1),
+            1)
+        positive_indices = tf.cast(
+            tf.squeeze(tf.where(positive_locs), 1),
+            tf.int32)
+        detection_boxes = tf.gather(detection_boxes, positive_indices)
+        detection_scores = tf.gather(detection_scores, positive_indices)
 
-            high_score_indices = tf.cast(tf.reshape(
-                tf.where(tf.greater(detection_score, FLAGS.score_threshold)),
-                [-1]), tf.int32)
-            detection_box = tf.gather(detection_box, high_score_indices)
-            detection_score = tf.gather(detection_score, high_score_indices)
+        high_score_indices = tf.cast(tf.reshape(
+            tf.where(tf.greater(detection_scores, FLAGS.score_threshold)),
+            [-1]), tf.int32)
+        detection_boxes = tf.gather(detection_boxes, high_score_indices)
+        detection_scores = tf.gather(detection_scores, high_score_indices)
 
-            selected_indices = tf.image.non_max_suppression(
-                detection_box,
-                detection_score,
-                max_output_size=FLAGS.max_output_size,
-                iou_threshold=FLAGS.iou_threshold)
-            detection_box = tf.gather(detection_box, selected_indices)
-            detection_score = tf.gather(detection_score, selected_indices)
-
-            detection_boxes_list.append(detection_box)
-            detection_scores_list.append(detection_score)
+        selected_indices = tf.image.non_max_suppression(
+            detection_boxes,
+            detection_scores,
+            max_output_size=FLAGS.max_output_size,
+            iou_threshold=FLAGS.iou_threshold)
+        detection_boxes = tf.gather(detection_boxes, selected_indices)
+        detection_scores = tf.gather(detection_scores, selected_indices)
 
         detection_dict = {
-            'detection_boxes': detection_boxes_list,
-            'detection_scores': detection_scores_list,
+            'detection_boxes': detection_boxes,
+            'detection_scores': detection_scores
         }
 
         return detection_dict
@@ -108,8 +131,11 @@ def build_model():
             FLAGS.is_training, FLAGS.num_classes, box_code_size=4)
         batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                          else tf.GraphKeys.UPDATE_OPS)
-        img_batch = tf.placeholder(
-            tf.int32, [None, FLAGS.image_size, FLAGS.image_size, 3], 'inputs')
+        img_batch = tf.placeholder(tf.int32,
+            [FLAGS.split_row * FLAGS.split_col, FLAGS.image_size, FLAGS.image_size, 3], 'input_imgs')
+        split_loc_batch = tf.placeholder(
+            tf.float32, [FLAGS.split_row * FLAGS.split_col, 4], 'input_locs')
+        split_locs = tf.expand_dims(split_loc_batch, 1)
         preimg_batch = tf.cast(img_batch, tf.float32) / 127.5 - 1
         anchors = tf.convert_to_tensor(
                 anchors, dtype=tf.float32, name='anchors')
@@ -135,9 +161,9 @@ def build_model():
                 box_encodings = tf.squeeze(box_encodings, axis=2)
             class_predictions_with_background = tf.concat(
                 pred_dict['class_predictions_with_background'], axis=1)
-        detection_dict = postprocess(anchors, box_encodings,
+        detection_dict = postprocess(anchors, split_locs, box_encodings,
                                      class_predictions_with_background)
-        return g, img_batch, detection_dict
+        return g, img_batch, split_loc_batch, detection_dict
 
 
 def load(sess, saver, checkpoint_dir):
@@ -150,22 +176,33 @@ def load(sess, saver, checkpoint_dir):
     else:
         raise Exception("[*] Failed to find a checkpoint")
 
+def hough_cir(img, minDist, pre, minRadius=15, maxRadius=30):
+    pre_img = cv2.equalizeHist(img)
+    pre_img = cv2.GaussianBlur(pre_img, (5, 5), 0)
+    pre_img = cv2.Laplacian(pre_img, -1, ksize=5)
+    pre_img = cv2.medianBlur(pre_img, 5)
+    cirs = cv2.HoughCircles(pre_img, cv2.HOUGH_GRADIENT, 1, minDist, param1=100,
+                        param2=pre, minRadius=minRadius, maxRadius=maxRadius)
+    cirs = np.int32(np.round(cirs[0, :, :2]))
+    boxes = np.concatenate((cirs - 20, cirs + 20), 1)
+    scores = np.ones(boxes.shape[0], np.float32)
+    return boxes, scores
 
-def draw_and_save(img, name, boxes, scores):
+def draw_bbox(img, boxes, scores, color=(0, 255, 0)):
     for box, score in zip(boxes, scores):
-        cv2.rectangle(img, (box[0], box[1]),
-                      (box[2], box[3]), (0, 255, 0), 1)
-        cv2.putText(img, 'cap:' + str(score)[0:4], (box[0], box[3]),
-                    cv2.FONT_HERSHEY_COMPLEX, 0.5, (0, 0, 255), 1)
-    cv2.imwrite(FLAGS.imwrite_dir + str(name) + '_result.jpg', img)
-
-
-def nms(boxes, scores, max_out):
-    pass
+        min_x = max(0, box[0])
+        min_y = max(0, box[1])
+        max_x = min(FLAGS.original_image_width, box[2])
+        max_y = min(FLAGS.original_image_height, box[3])
+        cv2.rectangle(img, (min_x, min_y),
+                      (max_x, max_y), color, 2)
+        cv2.putText(img, 'cap:' + str(score)[0:4], (min_x, max_y),
+                    cv2.FONT_HERSHEY_COMPLEX_SMALL, 0.5, color, 1)
+    return img
 
 
 def test_model():
-    g, img_batch, detection_dict = build_model()
+    g, img_batch, split_loc_batch, detection_dict = build_model()
     with g.as_default():
         init_op = tf.group(tf.global_variables_initializer(),
                            tf.local_variables_initializer())
@@ -181,26 +218,29 @@ def test_model():
             print('START TESTING...')
             with open(FLAGS.dataset_dir+'name.txt', 'r+') as f:
                 for name in f.readlines():
-                    name = name.strip('\n') + '_resize'
-                    img = cv2.imread(FLAGS.dataset_dir+'img/'+name+'.jpg', 0)
-                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                    img_name = name.strip('\n') + '_resize'
+                    img = cv2.imread(FLAGS.dataset_dir+'img/'+img_name+'.jpg', 0)
+                    color_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
                     split_imgs, clip_select = img_grid_split(
-                        img, FLAGS.split_row, FLAGS.split_col, FLAGS.image_size/2)
+                        color_img, FLAGS.split_row, FLAGS.split_col, FLAGS.image_size)
                     split_locs = np.tile(clip_select[:, :2], 2)
-                    detec = sess.run(detection_dict, {img_batch: split_imgs})
+                    split_locs = np.multiply(split_locs, _value_to_ratio)
+                    split_locs = split_locs.astype(np.float32)
+                    
+                    start_time = time()
+                    detec = sess.run(
+                        detection_dict, {img_batch: split_imgs, split_loc_batch: split_locs})
+                    print('time: %s' % (time()-start_time))
 
-                    boxes_list = []
-                    scores_list = []
-                    for split_boxes, split_scores, split_loc in zip(
-                            detec['detection_boxes'], detec['detection_scores'], split_locs):
-                        if split_boxes.shape[0]:
-                            split_boxes = (split_boxes * FLAGS.image_size).astype(int) + split_loc
-                            boxes_list.append(split_boxes)
-                            scores_list.append(split_scores)
-                    boxes = np.concatenate(boxes_list)
-                    scores = np.concatenate(scores_list)
-                    #boxes, scores = nms(boxes, scores, max_out=60)
-                    draw_and_save(img, img_name, boxes, scores)
+                    boxes = np.multiply(detec['detection_boxes'], _ratio_to_value)
+                    boxes = boxes.astype(np.int32)
+                    scores = detec['detection_scores']
+
+                    drawed_img = draw_bbox(color_img, boxes, scores)
+                    if FLAGS.add_hough:
+                        hough_boxes, hough_scores = hough_cir(img, 50, 35)
+                        drawed_img = draw_bbox(drawed_img, hough_boxes, hough_scores, color=(0, 0, 255))
+                    cv2.imwrite(FLAGS.imwrite_dir + str(img_name) + '_result.jpg', drawed_img)
             coord.request_stop()
             coord.join(threads)
             print('FINISHED TESTING.')
