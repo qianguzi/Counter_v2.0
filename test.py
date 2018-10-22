@@ -10,8 +10,8 @@ from dataset_ops.dataset_util import img_grid_split
 from detection_ops import feature_map_generator, box_coder, box_predictor, anchor_generator
 
 tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
-tf.app.flags.DEFINE_integer('split_row', 7, 'num of row')
-tf.app.flags.DEFINE_integer('split_col', 4, 'num of col')
+tf.app.flags.DEFINE_integer('split_row', 8, 'num of row')
+tf.app.flags.DEFINE_integer('split_col', 5, 'num of col')
 tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
 tf.app.flags.DEFINE_integer('image_size', 256, 'Input image resolution')
 tf.app.flags.DEFINE_integer('original_image_height', 800, 'Height of the original image')
@@ -111,8 +111,8 @@ def postprocess(anchors, split_locs, box_encodings,
             detection_scores,
             max_output_size=FLAGS.max_output_size,
             iou_threshold=FLAGS.iou_threshold)
-        detection_boxes = tf.gather(detection_boxes, selected_indices)
-        detection_scores = tf.gather(detection_scores, selected_indices)
+        detection_boxes = tf.gather(detection_boxes, selected_indices, name='detection_boxes')
+        detection_scores = tf.gather(detection_scores, selected_indices, name='detection_scores')
 
         detection_dict = {
             'detection_boxes': detection_boxes,
@@ -131,12 +131,17 @@ def build_model():
             FLAGS.is_training, FLAGS.num_classes, box_code_size=4)
         batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                          else tf.GraphKeys.UPDATE_OPS)
-        img_batch = tf.placeholder(tf.int32,
-            [FLAGS.split_row * FLAGS.split_col, FLAGS.image_size, FLAGS.image_size, 3], 'input_imgs')
-        split_loc_batch = tf.placeholder(
-            tf.float32, [FLAGS.split_row * FLAGS.split_col, 4], 'input_locs')
-        split_locs = tf.expand_dims(split_loc_batch, 1)
-        preimg_batch = tf.cast(img_batch, tf.float32) / 127.5 - 1
+        img_batch = tf.placeholder(tf.float32,
+            [1, FLAGS.original_image_height, FLAGS.original_image_width, 3], 'input_imgs')
+        clip_select_batch = tf.placeholder(tf.float32, [None, 4], 'input_clip')
+        split_locs = tf.tile(clip_select_batch[:, :2], [1, 2])
+        split_locs = tf.expand_dims(split_locs, 1)
+        num_batch = shape_utils.combined_static_and_dynamic_shape(clip_select_batch)
+        clip_boxes = tf.stack(
+            [clip_select_batch[:,1], clip_select_batch[:,0], clip_select_batch[:,3], clip_select_batch[:,2]], 1)
+        box_idx = tf.zeros(num_batch[0], tf.int32)
+        preimg_batch = tf.image.crop_and_resize(
+            img_batch, clip_boxes, box_idx, [FLAGS.image_size, FLAGS.image_size])
         anchors = tf.convert_to_tensor(
                 anchors, dtype=tf.float32, name='anchors')
         with slim.arg_scope([slim.batch_norm], is_training=(
@@ -163,7 +168,7 @@ def build_model():
                 pred_dict['class_predictions_with_background'], axis=1)
         detection_dict = postprocess(anchors, split_locs, box_encodings,
                                      class_predictions_with_background)
-        return g, img_batch, split_loc_batch, detection_dict
+        return g, img_batch, clip_select_batch, detection_dict
 
 
 def load(sess, saver, checkpoint_dir):
@@ -201,52 +206,66 @@ def draw_bbox(img, boxes, scores, color=(0, 255, 0)):
     return img
 
 
-def test_model():
-    g, img_batch, split_loc_batch, detection_dict = build_model()
+def convert_cpkt_to_pb():
+    g, _, _, _ = build_model()
+    output_node_names = ['Postprocessor/detection_boxes', 'Postprocessor/detection_scores']
     with g.as_default():
-        init_op = tf.group(tf.global_variables_initializer(),
-                           tf.local_variables_initializer())
+        init_op = tf.global_variables_initializer()
         with tf.Session() as sess:
             sess.run(init_op)
-            coord = tf.train.Coordinator()
-            threads = tf.train.start_queue_runners(sess=sess, coord=coord)
             # saver for restore model
             saver = tf.train.Saver()
             print('[*] Try to load trained model...')
             ckpt_name = load(sess, saver, FLAGS.checkpoint_dir)
+            output_graph_def = tf.graph_util.convert_variables_to_constants(
+                sess, g.as_graph_def(), output_node_names)
+            with tf.gfile.GFile(FLAGS.checkpoint_dir+ckpt_name+'.pb', "wb") as f:
+                f.write(output_graph_def.SerializeToString())
+
+
+def test_model():
+    g, img_batch, clip_select_batch, detection_dict = build_model()
+    with g.as_default():
+        init_op = tf.global_variables_initializer()
+        with tf.Session() as sess:
+            sess.run(init_op)
+            # saver for restore model
+            saver = tf.train.Saver()
+            print('[*] Try to load trained model...')
+            _ = load(sess, saver, FLAGS.checkpoint_dir)
 
             print('START TESTING...')
             with open(FLAGS.dataset_dir+'name.txt', 'r+') as f:
                 for name in f.readlines():
                     img_name = name.strip('\n') + '_resize'
                     img = cv2.imread(FLAGS.dataset_dir+'img/'+img_name+'.jpg', 0)
-                    color_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-                    split_imgs, clip_select = img_grid_split(
-                        color_img, FLAGS.split_row, FLAGS.split_col, FLAGS.image_size)
-                    split_locs = np.tile(clip_select[:, :2], 2)
-                    split_locs = np.multiply(split_locs, _value_to_ratio)
-                    split_locs = split_locs.astype(np.float32)
-                    
                     start_time = time()
-                    detec = sess.run(
-                        detection_dict, {img_batch: split_imgs, split_loc_batch: split_locs})
-                    print('time: %s' % (time()-start_time))
+                    color_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                    _, clip_select = img_grid_split(
+                        color_img, FLAGS.split_row, FLAGS.split_col, FLAGS.image_size)
+                    clip_select = np.multiply(clip_select, _value_to_ratio)
+                    clip_select = clip_select.astype(np.float32)
+                    input_img = color_img.astype(np.float32) / 127.5 - 1
+                    input_img = np.expand_dims(input_img, 0)
+                    
+                    detec = sess.run(detection_dict,
+                            {img_batch: input_img, clip_select_batch: clip_select})
 
                     boxes = np.multiply(detec['detection_boxes'], _ratio_to_value)
                     boxes = boxes.astype(np.int32)
                     scores = detec['detection_scores']
+                    print('time: %s' % (time()-start_time))
 
                     drawed_img = draw_bbox(color_img, boxes, scores)
                     if FLAGS.add_hough:
                         hough_boxes, hough_scores = hough_cir(img, 50, 35)
                         drawed_img = draw_bbox(drawed_img, hough_boxes, hough_scores, color=(0, 0, 255))
                     cv2.imwrite(FLAGS.imwrite_dir + str(img_name) + '_result.jpg', drawed_img)
-            coord.request_stop()
-            coord.join(threads)
             print('FINISHED TESTING.')
 
 
 def main(unused_arg):
+    #convert_cpkt_to_pb()
     test_model()
 
 

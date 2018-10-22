@@ -65,7 +65,7 @@ def img_grid_split(img, row, col, split_img_size):
     Args:
         img: 被裁剪的原始图片.
         row, col: 网格的行数和列数.
-        half_split_img_size： 需要裁取的图片尺寸的一半.
+        half_split_img_size： 需要裁取的图片尺寸.
     Return:
         split_imgs, clip_select: 裁取的图片以及其对应于原图的Bbox.
     """
