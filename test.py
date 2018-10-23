@@ -1,21 +1,26 @@
-import os, cv2
+import cv2
 import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.slim as slim
 from time import time
 
+from test_utils import *
+from detection_ops.utils import shape_utils
 from mobilenet import mobilenet_v2
 from detection_ops.utils import shape_utils
 from dataset_ops.dataset_util import img_grid_split
 from detection_ops import feature_map_generator, box_coder, box_predictor, anchor_generator
 
 tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
-tf.app.flags.DEFINE_integer('split_row', 8, 'num of row')
-tf.app.flags.DEFINE_integer('split_col', 5, 'num of col')
-tf.app.flags.DEFINE_integer('num_classes', 2, 'Number of classes to distinguish')
+tf.app.flags.DEFINE_float('split_row', 7.0, 'num of row')
+tf.app.flags.DEFINE_float('split_col', 4.0, 'num of col')
+tf.app.flags.DEFINE_integer(
+    'num_classes', 2, 'Number of classes to distinguish')
 tf.app.flags.DEFINE_integer('image_size', 256, 'Input image resolution')
-tf.app.flags.DEFINE_integer('original_image_height', 800, 'Height of the original image')
-tf.app.flags.DEFINE_integer('original_image_width', 600, 'Width of the original image')
+tf.app.flags.DEFINE_integer('original_image_height',
+                            800, 'Height of the original image')
+tf.app.flags.DEFINE_integer('original_image_width',
+                            600, 'Width of the original image')
 tf.app.flags.DEFINE_float('depth_multiplier', 0.75,
                           'Depth multiplier for mobilenet')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/counter_v2/',
@@ -30,9 +35,9 @@ tf.app.flags.DEFINE_bool('inplace_batchnorm_update', False,
                          'Whether to update batch norm moving average values inplace')
 tf.app.flags.DEFINE_bool('is_training', False, 'train or eval')
 tf.app.flags.DEFINE_bool('add_hough', False, 'Add hough circle detection')
-tf.app.flags.DEFINE_integer('max_output_size', 63, 'Max_output_size')
+tf.app.flags.DEFINE_integer('max_output_size', 70, 'Max_output_size')
 tf.app.flags.DEFINE_float('iou_threshold', 0.0, 'iou_threshold')
-tf.app.flags.DEFINE_float('score_threshold', 0.85, 'score_threshold')
+tf.app.flags.DEFINE_float('score_threshold', 0.90, 'score_threshold')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -51,42 +56,79 @@ _ratio_to_value = [
 ]
 
 _value_to_ratio = [
-    1/FLAGS.original_image_width,
     1/FLAGS.original_image_height,
     1/FLAGS.original_image_width,
-    1/FLAGS.original_image_height
+    1/FLAGS.original_image_height,
+    1/FLAGS.original_image_width
 ]
 
-#_anchors_figure = {
+# _anchors_figure = {
 #    'feature_map_dims': [(10, 10), (5, 5)],
 #    'scales': [[2.0], [1.0]],
 #    'aspect_ratios': [[1.0], [1.0]]
-#}
+# }
 _anchors_figure = {
     'feature_map_dims': [(8, 8), (4, 4)],
     'scales': [[1.6], [0.8]],
     'aspect_ratios': [[1.0], [1.0]]
 }
 
-def postprocess(anchors, split_locs, box_encodings,
+def generate_grid(img_shape, grid_size_tensor, clip_size, scope=None):
+    with tf.name_scope(scope, 'Grid_build', [img_shape, grid_size_tensor, clip_size]):
+        h, w = img_shape[1:3]
+        half_clip_size = tf.cast(clip_size / 2, tf.float32)
+        dy = tf.cast((h-clip_size) / grid_size_tensor[0], tf.float32)
+        dx = tf.cast((w-clip_size) / grid_size_tensor[1], tf.float32)
+        y = tf.range(half_clip_size, h-half_clip_size-1, dy, tf.float32)
+        x = tf.range(half_clip_size, w-half_clip_size-1, dx, tf.float32)
+        y = tf.concat([y, [h-half_clip_size]], 0)
+        x = tf.concat([x, [w-half_clip_size]], 0)
+        centers = tf.meshgrid(y, x)
+        centers = tf.stack(centers, axis=2)
+        centers = tf.reshape(centers, [-1, 2])
+        grid_points = tf.concat(
+            [centers - half_clip_size, centers + half_clip_size], 1)
+        grid_points = tf.multiply(grid_points, _value_to_ratio)
+        grid_points = tf.cast(grid_points, tf.float32, name='grid_points')
+        return grid_points
+
+
+def preprocess(img_tensor, grid_size_tensor, clip_size, scope=None):
+    with tf.name_scope(scope, 'Preprocess', [img_tensor, grid_size_tensor, clip_size]):
+        img_shape = shape_utils.combined_static_and_dynamic_shape(img_tensor)
+        grid_points = generate_grid(img_shape, grid_size_tensor, clip_size)
+        grid_points_tl = tf.stack([grid_points[:, 1], grid_points[:, 0]], 1)
+        grid_points_tl = tf.tile(grid_points_tl, [1, 2])
+        grid_points_tl = tf.expand_dims(grid_points_tl, 1)
+        num_batch = shape_utils.combined_static_and_dynamic_shape(
+            grid_points)
+        box_idx = tf.zeros(num_batch[0], tf.int32)
+        preimg_batch = tf.image.crop_and_resize(
+            img_tensor, grid_points, box_idx, [clip_size, clip_size])
+        return preimg_batch, grid_points_tl
+
+
+def postprocess(anchors, grid_points_tl, box_encodings,
                 class_predictions_with_background,
                 scope=None):
     """Converts prediction tensors to final detections."""
     with tf.name_scope(scope, 'Postprocessor',
-            [anchors, split_locs, box_encodings, class_predictions_with_background]):
+                       [anchors, grid_points_tl, box_encodings, class_predictions_with_background]):
         box_encodings = tf.identity(box_encodings, 'raw_box_encodings')
         detection_boxes = box_coder.batch_decode(box_encodings, anchors)
         detection_boxes = tf.identity(detection_boxes, 'raw_box_locations')
-        convert_ratio = tf.constant(_convert_ratio, tf.float32, name='convert_ratio')
-        detection_boxes = tf.multiply(detection_boxes, convert_ratio) + split_locs
+        convert_ratio = tf.constant(
+            _convert_ratio, tf.float32, name='convert_ratio')
+        detection_boxes = tf.multiply(
+            detection_boxes, convert_ratio) + grid_points_tl
         detection_boxes = tf.reshape(detection_boxes, [-1, 4])
-    
+
+        class_predictions_with_background = tf.reshape(
+            class_predictions_with_background, [-1, FLAGS.num_classes])
         detection_scores_with_background = tf.nn.softmax(
             class_predictions_with_background, name='softmax')
         detection_scores_with_background = tf.identity(
             detection_scores_with_background, 'raw_box_scores')
-        detection_scores_with_background = tf.reshape(
-            detection_scores_with_background, [-1, FLAGS.num_classes])
         detection_scores = tf.slice(detection_scores_with_background, [0, 1],
                                     [-1, -1])
         detection_scores = tf.squeeze(detection_scores, 1)
@@ -94,15 +136,13 @@ def postprocess(anchors, split_locs, box_encodings,
         positive_locs = tf.equal(
             tf.argmax(detection_scores_with_background, 1),
             1)
-        positive_indices = tf.cast(
-            tf.squeeze(tf.where(positive_locs), 1),
-            tf.int32)
+        positive_indices = tf.squeeze(tf.where(positive_locs), 1)
         detection_boxes = tf.gather(detection_boxes, positive_indices)
         detection_scores = tf.gather(detection_scores, positive_indices)
 
-        high_score_indices = tf.cast(tf.reshape(
+        high_score_indices = tf.reshape(
             tf.where(tf.greater(detection_scores, FLAGS.score_threshold)),
-            [-1]), tf.int32)
+            [-1])
         detection_boxes = tf.gather(detection_boxes, high_score_indices)
         detection_scores = tf.gather(detection_scores, high_score_indices)
 
@@ -111,8 +151,10 @@ def postprocess(anchors, split_locs, box_encodings,
             detection_scores,
             max_output_size=FLAGS.max_output_size,
             iou_threshold=FLAGS.iou_threshold)
-        detection_boxes = tf.gather(detection_boxes, selected_indices, name='detection_boxes')
-        detection_scores = tf.gather(detection_scores, selected_indices, name='detection_scores')
+        detection_boxes = tf.gather(
+            detection_boxes, selected_indices, name='detection_boxes')
+        detection_scores = tf.gather(
+            detection_scores, selected_indices, name='detection_scores')
 
         detection_dict = {
             'detection_boxes': detection_boxes,
@@ -131,19 +173,12 @@ def build_model():
             FLAGS.is_training, FLAGS.num_classes, box_code_size=4)
         batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                          else tf.GraphKeys.UPDATE_OPS)
-        img_batch = tf.placeholder(tf.float32,
-            [1, FLAGS.original_image_height, FLAGS.original_image_width, 3], 'input_imgs')
-        clip_select_batch = tf.placeholder(tf.float32, [None, 4], 'input_clip')
-        split_locs = tf.tile(clip_select_batch[:, :2], [1, 2])
-        split_locs = tf.expand_dims(split_locs, 1)
-        num_batch = shape_utils.combined_static_and_dynamic_shape(clip_select_batch)
-        clip_boxes = tf.stack(
-            [clip_select_batch[:,1], clip_select_batch[:,0], clip_select_batch[:,3], clip_select_batch[:,2]], 1)
-        box_idx = tf.zeros(num_batch[0], tf.int32)
-        preimg_batch = tf.image.crop_and_resize(
-            img_batch, clip_boxes, box_idx, [FLAGS.image_size, FLAGS.image_size])
+        img_tensor = tf.placeholder(tf.float32,
+                                    [1, FLAGS.original_image_height, FLAGS.original_image_width, 3], 'input_img')
+        grid_size_tensor = tf.placeholder(tf.float32, [2], 'input_grid_size')
+        preimg_batch, grid_points_tl = preprocess(img_tensor, grid_size_tensor, FLAGS.image_size)
         anchors = tf.convert_to_tensor(
-                anchors, dtype=tf.float32, name='anchors')
+            anchors, dtype=tf.float32, name='anchors')
         with slim.arg_scope([slim.batch_norm], is_training=(
             FLAGS.is_training and not FLAGS.freeze_batchnorm),
             updates_collections=batchnorm_updates_collections),\
@@ -166,49 +201,15 @@ def build_model():
                 box_encodings = tf.squeeze(box_encodings, axis=2)
             class_predictions_with_background = tf.concat(
                 pred_dict['class_predictions_with_background'], axis=1)
-        detection_dict = postprocess(anchors, split_locs, box_encodings,
+        detection_dict = postprocess(anchors, grid_points_tl, box_encodings,
                                      class_predictions_with_background)
-        return g, img_batch, clip_select_batch, detection_dict
-
-
-def load(sess, saver, checkpoint_dir):
-    ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
-    if ckpt and ckpt.model_checkpoint_path:
-        ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
-        saver.restore(sess, os.path.join(checkpoint_dir, ckpt_name))
-        print("[*] Success to read {}".format(ckpt_name))
-        return ckpt_name
-    else:
-        raise Exception("[*] Failed to find a checkpoint")
-
-def hough_cir(img, minDist, pre, minRadius=15, maxRadius=30):
-    pre_img = cv2.equalizeHist(img)
-    pre_img = cv2.GaussianBlur(pre_img, (5, 5), 0)
-    pre_img = cv2.Laplacian(pre_img, -1, ksize=5)
-    pre_img = cv2.medianBlur(pre_img, 5)
-    cirs = cv2.HoughCircles(pre_img, cv2.HOUGH_GRADIENT, 1, minDist, param1=100,
-                        param2=pre, minRadius=minRadius, maxRadius=maxRadius)
-    cirs = np.int32(np.round(cirs[0, :, :2]))
-    boxes = np.concatenate((cirs - 20, cirs + 20), 1)
-    scores = np.ones(boxes.shape[0], np.float32)
-    return boxes, scores
-
-def draw_bbox(img, boxes, scores, color=(0, 255, 0)):
-    for box, score in zip(boxes, scores):
-        min_x = max(0, box[0])
-        min_y = max(0, box[1])
-        max_x = min(FLAGS.original_image_width, box[2])
-        max_y = min(FLAGS.original_image_height, box[3])
-        cv2.rectangle(img, (min_x, min_y),
-                      (max_x, max_y), color, 2)
-        cv2.putText(img, 'cap:' + str(score)[0:4], (min_x, max_y),
-                    cv2.FONT_HERSHEY_COMPLEX_SMALL, 0.5, color, 1)
-    return img
+        return g, img_tensor, grid_size_tensor, detection_dict
 
 
 def convert_cpkt_to_pb():
     g, _, _, _ = build_model()
-    output_node_names = ['Postprocessor/detection_boxes', 'Postprocessor/detection_scores']
+    output_node_names = ['Postprocessor/detection_boxes',
+                         'Postprocessor/detection_scores']
     with g.as_default():
         init_op = tf.global_variables_initializer()
         with tf.Session() as sess:
@@ -224,7 +225,7 @@ def convert_cpkt_to_pb():
 
 
 def test_model():
-    g, img_batch, clip_select_batch, detection_dict = build_model()
+    g, img_tensor, grid_size_tensor, detection_dict = build_model()
     with g.as_default():
         init_op = tf.global_variables_initializer()
         with tf.Session() as sess:
@@ -238,20 +239,19 @@ def test_model():
             with open(FLAGS.dataset_dir+'name.txt', 'r+') as f:
                 for name in f.readlines():
                     img_name = name.strip('\n') + '_resize'
-                    img = cv2.imread(FLAGS.dataset_dir+'img/'+img_name+'.jpg', 0)
+                    img = cv2.imread(FLAGS.dataset_dir +
+                                     'img/'+img_name+'.jpg', 0)
                     start_time = time()
                     color_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-                    _, clip_select = img_grid_split(
-                        color_img, FLAGS.split_row, FLAGS.split_col, FLAGS.image_size)
-                    clip_select = np.multiply(clip_select, _value_to_ratio)
-                    clip_select = clip_select.astype(np.float32)
                     input_img = color_img.astype(np.float32) / 127.5 - 1
                     input_img = np.expand_dims(input_img, 0)
-                    
-                    detec = sess.run(detection_dict,
-                            {img_batch: input_img, clip_select_batch: clip_select})
+                    grid_size = np.array([FLAGS.split_row, FLAGS.split_col], np.float32)
 
-                    boxes = np.multiply(detec['detection_boxes'], _ratio_to_value)
+                    detec = sess.run(detection_dict,
+                                     {img_tensor: input_img, grid_size_tensor: grid_size})
+
+                    boxes = np.multiply(
+                        detec['detection_boxes'], _ratio_to_value)
                     boxes = boxes.astype(np.int32)
                     scores = detec['detection_scores']
                     print('time: %s' % (time()-start_time))
@@ -259,14 +259,57 @@ def test_model():
                     drawed_img = draw_bbox(color_img, boxes, scores)
                     if FLAGS.add_hough:
                         hough_boxes, hough_scores = hough_cir(img, 50, 35)
-                        drawed_img = draw_bbox(drawed_img, hough_boxes, hough_scores, color=(0, 0, 255))
-                    cv2.imwrite(FLAGS.imwrite_dir + str(img_name) + '_result.jpg', drawed_img)
+                        drawed_img = draw_bbox(
+                            drawed_img, hough_boxes, hough_scores, color=(0, 0, 255))
+                    cv2.imwrite(FLAGS.imwrite_dir + str(img_name) +
+                                '_result.jpg', drawed_img)
             print('FINISHED TESTING.')
 
 
+def model_test():
+  g = tf.Graph()
+  with g.as_default():
+    od_graph_def = tf.GraphDef()
+    with tf.gfile.FastGFile(FLAGS.checkpoint_dir+'model.ckpt-150000.pb', 'rb') as f:
+        od_graph_def.ParseFromString(f.read())
+        img_tensor, grid_size_tensor, output_boxes, output_scores = tf.import_graph_def(od_graph_def,
+            return_elements=['input_img:0', 'input_grid_size:0', 'Postprocessor/detection_boxes:0','Postprocessor/detection_scores:0'])
+    init_op = tf.global_variables_initializer()
+    with tf.Session() as sess:
+        sess.run(init_op)
+        with open(FLAGS.dataset_dir+'name.txt', 'r+') as f:
+            for name in f.readlines():
+                img_name = name.strip('\n') + '_resize'
+                img = cv2.imread(FLAGS.dataset_dir +
+                                'img/'+img_name+'.jpg', 0)
+                start_time = time()
+                color_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                input_img = color_img.astype(np.float32) / 127.5 - 1
+                input_img = np.expand_dims(input_img, 0)
+                grid_size = np.array([FLAGS.split_row, FLAGS.split_col], np.float32)
+
+                boxes, scores = sess.run([output_boxes, output_scores],
+                                {img_tensor: input_img, grid_size_tensor: grid_size})
+                boxes = np.multiply(boxes, _ratio_to_value)
+                boxes = boxes.astype(np.int32)
+                print('time: %s' % (time()-start_time))
+
+                drawed_img = draw_bbox(color_img, boxes, scores)
+                if FLAGS.add_hough:
+                    hough_boxes, hough_scores = hough_cir(img, 50, 35)
+                    drawed_img = draw_bbox(
+                        drawed_img, hough_boxes, hough_scores, color=(0, 0, 255))
+                cv2.imwrite(FLAGS.imwrite_dir + str(img_name) +
+                            '_result.jpg', drawed_img)
+        print('FINISHED TESTING.')
+
+  #print(predictions, labels)
+  return predictions
+
 def main(unused_arg):
     #convert_cpkt_to_pb()
-    test_model()
+    #test_model()
+    model_test()
 
 
 if __name__ == '__main__':
