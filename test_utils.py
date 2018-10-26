@@ -1,6 +1,35 @@
 import os, cv2
 import numpy as np
 import tensorflow as tf
+import tensorflow.contrib.slim as slim
+
+
+def get_checkpoint_init_fn(fine_tune_checkpoint, include_var=None, exclude_var=None):
+    """Returns the checkpoint init_fn if the checkpoint is provided."""
+
+    variables_to_restore = slim.get_variables_to_restore(include_var, exclude_var)
+    slim_init_fn = slim.assign_from_checkpoint_fn(
+        fine_tune_checkpoint,
+        variables_to_restore,
+        ignore_missing_vars=True)
+
+    def init_fn(sess):
+      slim_init_fn(sess)
+    return init_fn
+
+
+def read_pb_model(pb_path, graph_def, return_elements):
+    with tf.gfile.FastGFile(pb_path, 'rb') as f:
+        graph_def.ParseFromString(f.read())
+        return_tensors = tf.import_graph_def(graph_def, return_elements)
+        return return_tensors
+
+
+def write_pb_model(pb_path, sess, graph_def, output_node_names):
+    output_graph_def = tf.graph_util.convert_variables_to_constants(
+        sess, graph_def, output_node_names)
+    with tf.gfile.GFile(pb_path, "wb") as f:
+        f.write(output_graph_def.SerializeToString())
 
 
 def load(sess, saver, checkpoint_dir):

@@ -5,15 +5,13 @@ import tensorflow.contrib.slim as slim
 from time import time
 
 from test_utils import *
-from detection_ops.utils import shape_utils
 from mobilenet import mobilenet_v2
-from detection_ops.utils import shape_utils
-from dataset_ops.dataset_util import img_grid_split
-from detection_ops import feature_map_generator, box_coder, box_predictor, anchor_generator
+from detection_ops import feature_map_generator, box_predictor, anchor_generator
+from process_op import *
 
 tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
-tf.app.flags.DEFINE_float('split_row', 7.0, 'num of row')
-tf.app.flags.DEFINE_float('split_col', 4.0, 'num of col')
+tf.app.flags.DEFINE_float('split_row', 5.0, 'num of row')
+tf.app.flags.DEFINE_float('split_col', 3.0, 'num of col')
 tf.app.flags.DEFINE_integer(
     'num_classes', 2, 'Number of classes to distinguish')
 tf.app.flags.DEFINE_integer('image_size', 256, 'Input image resolution')
@@ -35,9 +33,9 @@ tf.app.flags.DEFINE_bool('inplace_batchnorm_update', False,
                          'Whether to update batch norm moving average values inplace')
 tf.app.flags.DEFINE_bool('is_training', False, 'train or eval')
 tf.app.flags.DEFINE_bool('add_hough', False, 'Add hough circle detection')
-tf.app.flags.DEFINE_integer('max_output_size', 70, 'Max_output_size')
-tf.app.flags.DEFINE_float('iou_threshold', 0.0, 'iou_threshold')
-tf.app.flags.DEFINE_float('score_threshold', 0.90, 'score_threshold')
+tf.app.flags.DEFINE_integer('max_output_size', 500, 'Max_output_size')
+tf.app.flags.DEFINE_float('iou_threshold', 0.05, 'iou_threshold')
+tf.app.flags.DEFINE_float('score_threshold', 0.0, 'score_threshold')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -73,98 +71,8 @@ _anchors_figure = {
     'aspect_ratios': [[1.0], [1.0]]
 }
 
-def generate_grid(img_shape, grid_size_tensor, clip_size, scope=None):
-    with tf.name_scope(scope, 'Grid_build', [img_shape, grid_size_tensor, clip_size]):
-        h, w = img_shape[1:3]
-        half_clip_size = tf.cast(clip_size / 2, tf.float32)
-        dy = tf.cast((h-clip_size) / grid_size_tensor[0], tf.float32)
-        dx = tf.cast((w-clip_size) / grid_size_tensor[1], tf.float32)
-        y = tf.range(half_clip_size, h-half_clip_size-1, dy, tf.float32)
-        x = tf.range(half_clip_size, w-half_clip_size-1, dx, tf.float32)
-        y = tf.concat([y, [h-half_clip_size]], 0)
-        x = tf.concat([x, [w-half_clip_size]], 0)
-        centers = tf.meshgrid(y, x)
-        centers = tf.stack(centers, axis=2)
-        centers = tf.reshape(centers, [-1, 2])
-        grid_points = tf.concat(
-            [centers - half_clip_size, centers + half_clip_size], 1)
-        grid_points = tf.multiply(grid_points, _value_to_ratio)
-        grid_points = tf.cast(grid_points, tf.float32, name='grid_points')
-        return grid_points
 
-
-def preprocess(img_tensor, grid_size_tensor, clip_size, scope=None):
-    with tf.name_scope(scope, 'Preprocess', [img_tensor, grid_size_tensor, clip_size]):
-        img_shape = shape_utils.combined_static_and_dynamic_shape(img_tensor)
-        grid_points = generate_grid(img_shape, grid_size_tensor, clip_size)
-        grid_points_tl = tf.stack([grid_points[:, 1], grid_points[:, 0]], 1)
-        grid_points_tl = tf.tile(grid_points_tl, [1, 2])
-        grid_points_tl = tf.expand_dims(grid_points_tl, 1)
-        num_batch = shape_utils.combined_static_and_dynamic_shape(
-            grid_points)
-        box_idx = tf.zeros(num_batch[0], tf.int32)
-        preimg_batch = tf.image.crop_and_resize(
-            img_tensor, grid_points, box_idx, [clip_size, clip_size])
-        return preimg_batch, grid_points_tl
-
-
-def postprocess(anchors, grid_points_tl, box_encodings,
-                class_predictions_with_background,
-                scope=None):
-    """Converts prediction tensors to final detections."""
-    with tf.name_scope(scope, 'Postprocessor',
-                       [anchors, grid_points_tl, box_encodings, class_predictions_with_background]):
-        box_encodings = tf.identity(box_encodings, 'raw_box_encodings')
-        detection_boxes = box_coder.batch_decode(box_encodings, anchors)
-        detection_boxes = tf.identity(detection_boxes, 'raw_box_locations')
-        convert_ratio = tf.constant(
-            _convert_ratio, tf.float32, name='convert_ratio')
-        detection_boxes = tf.multiply(
-            detection_boxes, convert_ratio) + grid_points_tl
-        detection_boxes = tf.reshape(detection_boxes, [-1, 4])
-
-        class_predictions_with_background = tf.reshape(
-            class_predictions_with_background, [-1, FLAGS.num_classes])
-        detection_scores_with_background = tf.nn.softmax(
-            class_predictions_with_background, name='softmax')
-        detection_scores_with_background = tf.identity(
-            detection_scores_with_background, 'raw_box_scores')
-        detection_scores = tf.slice(detection_scores_with_background, [0, 1],
-                                    [-1, -1])
-        detection_scores = tf.squeeze(detection_scores, 1)
-
-        positive_locs = tf.equal(
-            tf.argmax(detection_scores_with_background, 1),
-            1)
-        positive_indices = tf.squeeze(tf.where(positive_locs), 1)
-        detection_boxes = tf.gather(detection_boxes, positive_indices)
-        detection_scores = tf.gather(detection_scores, positive_indices)
-
-        high_score_indices = tf.reshape(
-            tf.where(tf.greater(detection_scores, FLAGS.score_threshold)),
-            [-1])
-        detection_boxes = tf.gather(detection_boxes, high_score_indices)
-        detection_scores = tf.gather(detection_scores, high_score_indices)
-
-        selected_indices = tf.image.non_max_suppression(
-            detection_boxes,
-            detection_scores,
-            max_output_size=FLAGS.max_output_size,
-            iou_threshold=FLAGS.iou_threshold)
-        detection_boxes = tf.gather(
-            detection_boxes, selected_indices, name='detection_boxes')
-        detection_scores = tf.gather(
-            detection_scores, selected_indices, name='detection_scores')
-
-        detection_dict = {
-            'detection_boxes': detection_boxes,
-            'detection_scores': detection_scores
-        }
-
-        return detection_dict
-
-
-def build_model():
+def build_model(apply_or_model=False):
     g = tf.Graph()
     with g.as_default(), tf.device(
             tf.train.replica_device_setter(FLAGS.ps_tasks)):
@@ -173,12 +81,17 @@ def build_model():
             FLAGS.is_training, FLAGS.num_classes, box_code_size=4)
         batchnorm_updates_collections = (None if FLAGS.inplace_batchnorm_update
                                          else tf.GraphKeys.UPDATE_OPS)
+        anchors = tf.convert_to_tensor(anchors, dtype=tf.float32, name='anchors')
+        convert_ratio = tf.convert_to_tensor(_convert_ratio, tf.float32, name='convert_ratio')
+        value_to_ratio = tf.convert_to_tensor(_value_to_ratio, tf.float32, name='convert_ratio')
+
         img_tensor = tf.placeholder(tf.float32,
-                                    [1, FLAGS.original_image_height, FLAGS.original_image_width, 3], 'input_img')
+                                    [1, FLAGS.original_image_height, FLAGS.original_image_width, 3],
+                                    name='input_img')
         grid_size_tensor = tf.placeholder(tf.float32, [2], 'input_grid_size')
-        preimg_batch, grid_points_tl = preprocess(img_tensor, grid_size_tensor, FLAGS.image_size)
-        anchors = tf.convert_to_tensor(
-            anchors, dtype=tf.float32, name='anchors')
+        preimg_batch, grid_points_tl = preprocess(
+            img_tensor, grid_size_tensor, FLAGS.image_size, value_to_ratio, apply_or_model)
+
         with slim.arg_scope([slim.batch_norm], is_training=(
             FLAGS.is_training and not FLAGS.freeze_batchnorm),
             updates_collections=batchnorm_updates_collections),\
@@ -201,15 +114,26 @@ def build_model():
                 box_encodings = tf.squeeze(box_encodings, axis=2)
             class_predictions_with_background = tf.concat(
                 pred_dict['class_predictions_with_background'], axis=1)
-        detection_dict = postprocess(anchors, grid_points_tl, box_encodings,
-                                     class_predictions_with_background)
-        return g, img_tensor, grid_size_tensor, detection_dict
+        detection_boxes, detection_scores_with_background = postprocess(
+            anchors, box_encodings, 
+            class_predictions_with_background,
+            convert_ratio, grid_points_tl,
+            num_classes=FLAGS.num_classes)
+        detection_dict = precise_filter(detection_boxes, 
+                                        detection_scores_with_background,
+                                        max_output_size=FLAGS.max_output_size,
+                                        iou_threshold=FLAGS.iou_threshold,
+                                        score_threshold=FLAGS.score_threshold)
+        if apply_or_model:
+            return g, img_tensor, detection_boxes, detection_scores_with_background
+        else:
+            return g, img_tensor, grid_size_tensor, detection_dict
 
 
 def convert_cpkt_to_pb():
     g, _, _, _ = build_model()
-    output_node_names = ['Postprocessor/detection_boxes',
-                         'Postprocessor/detection_scores']
+    output_node_names = ['Precise_filter/result_boxes',
+                         'Precise_filter/result_scores']
     with g.as_default():
         init_op = tf.global_variables_initializer()
         with tf.Session() as sess:
@@ -218,10 +142,8 @@ def convert_cpkt_to_pb():
             saver = tf.train.Saver()
             print('[*] Try to load trained model...')
             ckpt_name = load(sess, saver, FLAGS.checkpoint_dir)
-            output_graph_def = tf.graph_util.convert_variables_to_constants(
-                sess, g.as_graph_def(), output_node_names)
-            with tf.gfile.GFile(FLAGS.checkpoint_dir+ckpt_name+'.pb', "wb") as f:
-                f.write(output_graph_def.SerializeToString())
+            write_pb_model(FLAGS.checkpoint_dir+ckpt_name+'.pb',
+                            sess, g.as_graph_def(), output_node_names)
 
 
 def test_model():
@@ -251,9 +173,9 @@ def test_model():
                                      {img_tensor: input_img, grid_size_tensor: grid_size})
 
                     boxes = np.multiply(
-                        detec['detection_boxes'], _ratio_to_value)
+                        detec['result_boxes'], _ratio_to_value)
                     boxes = boxes.astype(np.int32)
-                    scores = detec['detection_scores']
+                    scores = detec['result_scores']
                     print('time: %s' % (time()-start_time))
 
                     drawed_img = draw_bbox(color_img, boxes, scores)
@@ -272,23 +194,23 @@ def model_test():
     od_graph_def = tf.GraphDef()
     with tf.gfile.FastGFile(FLAGS.checkpoint_dir+'model.ckpt-150000.pb', 'rb') as f:
         od_graph_def.ParseFromString(f.read())
-        img_tensor, grid_size_tensor, output_boxes, output_scores = tf.import_graph_def(od_graph_def,
-            return_elements=['input_img:0', 'input_grid_size:0', 'Postprocessor/detection_boxes:0','Postprocessor/detection_scores:0'])
+        img_tensor, grid_size_tensor, detection_boxes, detection_scores = tf.import_graph_def(od_graph_def,
+            return_elements=['input_img:0', 'input_grid_size:0', 'Precise_filter/result_boxes:0','Precise_filter/result_scores:0'])
     init_op = tf.global_variables_initializer()
     with tf.Session() as sess:
         sess.run(init_op)
         with open(FLAGS.dataset_dir+'name.txt', 'r+') as f:
             for name in f.readlines():
                 img_name = name.strip('\n') + '_resize'
+                start_time = time()
                 img = cv2.imread(FLAGS.dataset_dir +
                                 'img/'+img_name+'.jpg', 0)
-                start_time = time()
                 color_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
                 input_img = color_img.astype(np.float32) / 127.5 - 1
                 input_img = np.expand_dims(input_img, 0)
                 grid_size = np.array([FLAGS.split_row, FLAGS.split_col], np.float32)
 
-                boxes, scores = sess.run([output_boxes, output_scores],
+                boxes, scores = sess.run([detection_boxes, detection_scores],
                                 {img_tensor: input_img, grid_size_tensor: grid_size})
                 boxes = np.multiply(boxes, _ratio_to_value)
                 boxes = boxes.astype(np.int32)
@@ -303,13 +225,11 @@ def model_test():
                             '_result.jpg', drawed_img)
         print('FINISHED TESTING.')
 
-  #print(predictions, labels)
-  return predictions
 
 def main(unused_arg):
-    #convert_cpkt_to_pb()
-    #test_model()
-    model_test()
+    convert_cpkt_to_pb()
+    test_model()
+    #model_test()
 
 
 if __name__ == '__main__':
