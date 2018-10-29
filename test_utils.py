@@ -21,7 +21,7 @@ def get_checkpoint_init_fn(fine_tune_checkpoint, include_var=None, exclude_var=N
 def read_pb_model(pb_path, graph_def, return_elements):
     with tf.gfile.FastGFile(pb_path, 'rb') as f:
         graph_def.ParseFromString(f.read())
-        return_tensors = tf.import_graph_def(graph_def, return_elements)
+        return_tensors = tf.import_graph_def(graph_def, return_elements=return_elements)
         return return_tensors
 
 
@@ -43,17 +43,45 @@ def load(sess, saver, checkpoint_dir):
         raise Exception("[*] Failed to find a checkpoint")
 
 
-def hough_cir(img, minDist, pre, minRadius=15, maxRadius=30):
-    pre_img = cv2.equalizeHist(img)
-    pre_img = cv2.GaussianBlur(pre_img, (5, 5), 0)
-    pre_img = cv2.Laplacian(pre_img, -1, ksize=5)
-    pre_img = cv2.medianBlur(pre_img, 5)
-    cirs = cv2.HoughCircles(pre_img, cv2.HOUGH_GRADIENT, 1, minDist, param1=100,
-                            param2=pre, minRadius=minRadius, maxRadius=maxRadius)
-    cirs = np.int32(np.round(cirs[0, :, :2]))
-    boxes = np.concatenate((cirs - 20, cirs + 20), 1)
-    scores = np.ones(boxes.shape[0], np.float32)
-    return boxes, scores
+def hough_cir_detection(img, minDist=55, precise=35, minRadius=10, maxRadius=30, 
+                        custom_radius=28.0, apply_custom_radius=True):
+    equ_img = cv2.equalizeHist(img)
+    gau_img = cv2.GaussianBlur(equ_img, (5, 5), 0)
+    lap_img = cv2.Laplacian(gau_img, -1, ksize=5)
+    pre_img = cv2.medianBlur(lap_img, 5)
+    circles = cv2.HoughCircles(pre_img, cv2.HOUGH_GRADIENT, 1, minDist=minDist, param1=100,
+                                param2=precise, minRadius=minRadius, maxRadius=maxRadius)
+    centers = circles[0, :, :2]
+    if apply_custom_radius:
+        hough_boxes = [[max(0, c[0]-custom_radius)/600, max(0, c[1]-custom_radius)/800, \
+                    min(c[0]+custom_radius, 600)/600, min(c[1]+custom_radius, 800)/800] for c in centers]
+    else:
+        radius = np.minimum(circles[0, :, 2] + 5, custom_radius)
+        hough_boxes = [[max(0, c[0]-r)/600, max(0, c[1]-r)/800, \
+                    min(c[0]+r, 600)/600, min(c[1]+r, 800)/800] for c, r in zip(centers,radius)]
+    return hough_boxes
+
+
+def abnormal_filter(boxes, scores, abnormal_indices):
+    abnormal=[]
+    center0 = (boxes[abnormal_indices[0,0], 2]-boxes[abnormal_indices[0,0], 0])/2 + boxes[abnormal_indices[0,0], 0]
+    center1 = (boxes[abnormal_indices[0,1], 3]-boxes[abnormal_indices[0,1], 1])/2 + boxes[abnormal_indices[0,1], 1]
+    center2 = (boxes[abnormal_indices[-1,0], 2]-boxes[abnormal_indices[-1,0], 0])/2 + boxes[abnormal_indices[-1,0], 0]
+    center3 = (boxes[abnormal_indices[-1,1], 3]-boxes[abnormal_indices[-1,1], 1])/2 + boxes[abnormal_indices[-1,1], 1]
+
+    if center0<boxes[abnormal_indices[1,0], 0]:
+        abnormal.append(abnormal_indices[0,0])
+    if center1<boxes[abnormal_indices[1,1], 1]:
+        abnormal.append(abnormal_indices[0,1])
+    if center2>boxes[abnormal_indices[2,0], 2]:
+        abnormal.append(abnormal_indices[-1,0])
+    if center3>boxes[abnormal_indices[2,1], 3]:
+        abnormal.append(abnormal_indices[-1,1])
+    abnormal_idx = list(set(abnormal))
+    new_boxes = np.delete(boxes, abnormal_idx, axis=0)
+    new_scores = np.delete(scores, abnormal_idx)
+    return new_boxes, new_scores
+
 
 
 def draw_bbox(img, boxes, scores, color=(0, 255, 0)):

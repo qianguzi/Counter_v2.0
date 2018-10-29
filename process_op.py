@@ -1,4 +1,6 @@
 import tensorflow as tf
+from tensorflow.contrib.framework import argsort
+
 from detection_ops.utils import shape_utils
 from detection_ops import box_coder
 
@@ -7,9 +9,11 @@ def postprocess(anchors, box_encodings,
                 convert_ratio=None,
                 clip_windows_tl=None,
                 num_classes=2,
+                score_threshold=0.0,
+                apply_and_model=False,
                 scope=None):
     """Converts prediction tensors to detections."""
-    with tf.name_scope(scope, 'Postprocessor', [num_classes]):
+    with tf.name_scope(scope, 'Postprocessor', [num_classes, score_threshold]):
         box_encodings = tf.identity(box_encodings, 'raw_box_encodings')
         detection_boxes = box_coder.batch_decode(box_encodings, anchors)
         if convert_ratio is not None:
@@ -20,25 +24,9 @@ def postprocess(anchors, box_encodings,
         class_predictions_with_background = tf.reshape(
             class_predictions_with_background, [-1, num_classes])
         detection_scores_with_background = tf.nn.softmax(
-            class_predictions_with_background, name='raw_box_scores')
-
-        return detection_boxes, detection_scores_with_background
-
-
-def precise_filter(detection_boxes, 
-                    detection_scores_with_background, 
-                    detection_scores=None, 
-                    max_output_size=70,
-                    iou_threshold=0.05,
-                    score_threshold=0.6,
-                    high_score_screening=False,
-                    non_max_suppression_screening=True,
-                    scope=None):
-    with tf.name_scope(
-        scope, 'Precise_filter', [max_output_size, iou_threshold, score_threshold]):
-        if detection_scores is None:
-            detection_scores = tf.slice(detection_scores_with_background, [0, 1],[-1, -1])
-            detection_scores = tf.squeeze(detection_scores, 1)
+            class_predictions_with_background)
+        detection_scores = tf.slice(detection_scores_with_background, [0, 1],[-1, -1])
+        detection_scores = tf.squeeze(detection_scores, 1, name='raw_box_scores')
         
         positive_indices = tf.equal(
             tf.argmax(detection_scores_with_background, 1),
@@ -46,27 +34,40 @@ def precise_filter(detection_boxes,
         positive_indices = tf.squeeze(tf.where(positive_indices), 1)
         result_boxes = tf.gather(detection_boxes, positive_indices)
         result_scores = tf.gather(detection_scores, positive_indices)
-
-        if high_score_screening:
+        if not apply_and_model:
             high_score_indices = tf.reshape(
                 tf.where(tf.greater(result_scores, score_threshold)),
                 [-1])
             result_boxes = tf.gather(result_boxes, high_score_indices)
             result_scores = tf.gather(result_scores, high_score_indices)
-        if non_max_suppression_screening:
-            selected_indices = tf.image.non_max_suppression(
-                result_boxes,
-                result_scores,
-                max_output_size,
-                iou_threshold)
-            result_boxes = tf.gather(result_boxes, selected_indices)
-            result_scores = tf.gather(result_scores, selected_indices)
-
         result_boxes = tf.identity(result_boxes, name='result_boxes')
         result_scores = tf.identity(result_scores, name='result_scores')
+
+        return result_boxes, result_scores
+
+
+def non_max_suppression(detection_boxes, 
+                    detection_scores, 
+                    max_output_size=70,
+                    iou_threshold=0.05,
+                    scope=None):
+    with tf.name_scope(
+        scope, 'Non_max_suppression', [max_output_size, iou_threshold]):
+        selected_indices = tf.image.non_max_suppression(
+            detection_boxes,
+            detection_scores,
+            max_output_size,
+            iou_threshold)
+        result_boxes = tf.gather(detection_boxes, selected_indices, name='result_boxes')
+        result_scores = tf.gather(detection_scores, selected_indices, name='result_scores')
+
+        abnormal_indices = argsort(result_boxes[:,:2], axis=0)
+        abnormal_indices = tf.concat([abnormal_indices[:2], abnormal_indices[-2:]], 0, name='abnormal_indices')
+
         result_dict = {
             'result_boxes': result_boxes,
-            'result_scores': result_scores
+            'result_scores': result_scores,
+            'abnormal_indices': abnormal_indices
         }
         return result_dict
 

@@ -4,10 +4,11 @@ import tensorflow as tf
 import tensorflow.contrib.slim as slim
 from time import time
 
-from test_utils import *
 from mobilenet import mobilenet_v2
+from detection_ops.utils import shape_utils
 from detection_ops import feature_map_generator, box_predictor, anchor_generator
 from process_op import *
+from test_utils import *
 
 tf.app.flags.DEFINE_integer('ps_tasks', 0, 'Number of ps')
 tf.app.flags.DEFINE_float('split_row', 5.0, 'num of row')
@@ -32,10 +33,10 @@ tf.app.flags.DEFINE_bool('freeze_batchnorm', False,
 tf.app.flags.DEFINE_bool('inplace_batchnorm_update', False,
                          'Whether to update batch norm moving average values inplace')
 tf.app.flags.DEFINE_bool('is_training', False, 'train or eval')
-tf.app.flags.DEFINE_bool('add_hough', False, 'Add hough circle detection')
-tf.app.flags.DEFINE_integer('max_output_size', 500, 'Max_output_size')
-tf.app.flags.DEFINE_float('iou_threshold', 0.05, 'iou_threshold')
-tf.app.flags.DEFINE_float('score_threshold', 0.0, 'score_threshold')
+tf.app.flags.DEFINE_bool('add_hough', True, 'Add hough circle detection')
+tf.app.flags.DEFINE_integer('max_output_size', 70, 'Max_output_size')
+tf.app.flags.DEFINE_float('iou_threshold', 0.04, 'iou_threshold')
+tf.app.flags.DEFINE_float('score_threshold', 0.7, 'score_threshold')
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -72,7 +73,7 @@ _anchors_figure = {
 }
 
 
-def build_model(apply_or_model=False):
+def build_model(apply_or_model=False, apply_and_model=False):
     g = tf.Graph()
     with g.as_default(), tf.device(
             tf.train.replica_device_setter(FLAGS.ps_tasks)):
@@ -114,27 +115,28 @@ def build_model(apply_or_model=False):
                 box_encodings = tf.squeeze(box_encodings, axis=2)
             class_predictions_with_background = tf.concat(
                 pred_dict['class_predictions_with_background'], axis=1)
-        detection_boxes, detection_scores_with_background = postprocess(
+        detection_boxes, detection_scores = postprocess(
             anchors, box_encodings, 
             class_predictions_with_background,
             convert_ratio, grid_points_tl,
-            num_classes=FLAGS.num_classes)
-        detection_dict = precise_filter(detection_boxes, 
-                                        detection_scores_with_background,
+            num_classes=FLAGS.num_classes,
+            score_threshold=FLAGS.score_threshold,
+            apply_and_model=apply_and_model)
+        input_boxes = tf.placeholder_with_default(detection_boxes[:1], [None, 4], name='input_boxes')
+        if apply_or_model or apply_and_model:
+            return g, img_tensor, input_boxes, detection_boxes, detection_scores
+        num_batch = shape_utils.combined_static_and_dynamic_shape(input_boxes)
+        input_scores = tf.tile([0.7], [num_batch[0]])
+        total_boxes = tf.concat([detection_boxes, input_boxes], 0)
+        total_scores = tf.concat([detection_scores, input_scores], 0)
+        result_dict = non_max_suppression(total_boxes,
+                                        total_scores,
                                         max_output_size=FLAGS.max_output_size,
-                                        iou_threshold=FLAGS.iou_threshold,
-                                        score_threshold=FLAGS.score_threshold)
-        if apply_or_model:
-            return g, img_tensor, detection_boxes, detection_scores_with_background
-        else:
-            return g, img_tensor, grid_size_tensor, detection_dict
-
-
-def convert_cpkt_to_pb():
-    g, _, _, _ = build_model()
-    output_node_names = ['Precise_filter/result_boxes',
-                         'Precise_filter/result_scores']
-    with g.as_default():
+                                        iou_threshold=FLAGS.iou_threshold)
+        
+        output_node_names = ['Non_max_suppression/result_boxes',
+                         'Non_max_suppression/result_scores',
+                         'Non_max_suppression/abnormal_indices']
         init_op = tf.global_variables_initializer()
         with tf.Session() as sess:
             sess.run(init_op)
@@ -146,56 +148,19 @@ def convert_cpkt_to_pb():
                             sess, g.as_graph_def(), output_node_names)
 
 
-def test_model():
-    g, img_tensor, grid_size_tensor, detection_dict = build_model()
-    with g.as_default():
-        init_op = tf.global_variables_initializer()
-        with tf.Session() as sess:
-            sess.run(init_op)
-            # saver for restore model
-            saver = tf.train.Saver()
-            print('[*] Try to load trained model...')
-            _ = load(sess, saver, FLAGS.checkpoint_dir)
-
-            print('START TESTING...')
-            with open(FLAGS.dataset_dir+'name.txt', 'r+') as f:
-                for name in f.readlines():
-                    img_name = name.strip('\n') + '_resize'
-                    img = cv2.imread(FLAGS.dataset_dir +
-                                     'img/'+img_name+'.jpg', 0)
-                    start_time = time()
-                    color_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-                    input_img = color_img.astype(np.float32) / 127.5 - 1
-                    input_img = np.expand_dims(input_img, 0)
-                    grid_size = np.array([FLAGS.split_row, FLAGS.split_col], np.float32)
-
-                    detec = sess.run(detection_dict,
-                                     {img_tensor: input_img, grid_size_tensor: grid_size})
-
-                    boxes = np.multiply(
-                        detec['result_boxes'], _ratio_to_value)
-                    boxes = boxes.astype(np.int32)
-                    scores = detec['result_scores']
-                    print('time: %s' % (time()-start_time))
-
-                    drawed_img = draw_bbox(color_img, boxes, scores)
-                    if FLAGS.add_hough:
-                        hough_boxes, hough_scores = hough_cir(img, 50, 35)
-                        drawed_img = draw_bbox(
-                            drawed_img, hough_boxes, hough_scores, color=(0, 0, 255))
-                    cv2.imwrite(FLAGS.imwrite_dir + str(img_name) +
-                                '_result.jpg', drawed_img)
-            print('FINISHED TESTING.')
-
-
 def model_test():
   g = tf.Graph()
   with g.as_default():
     od_graph_def = tf.GraphDef()
     with tf.gfile.FastGFile(FLAGS.checkpoint_dir+'model.ckpt-150000.pb', 'rb') as f:
         od_graph_def.ParseFromString(f.read())
-        img_tensor, grid_size_tensor, detection_boxes, detection_scores = tf.import_graph_def(od_graph_def,
-            return_elements=['input_img:0', 'input_grid_size:0', 'Precise_filter/result_boxes:0','Precise_filter/result_scores:0'])
+        img_tensor, grid_size_tensor, input_boxes_tensor, \
+            result_boxes, result_scores, abnormal_indices= tf.import_graph_def(
+                od_graph_def,
+                return_elements=['input_img:0', 'input_grid_size:0', 'input_boxes:0', \
+                                'Non_max_suppression/result_boxes:0', \
+                                'Non_max_suppression/result_scores:0', \
+                                'Non_max_suppression/abnormal_indices:0'])
     init_op = tf.global_variables_initializer()
     with tf.Session() as sess:
         sess.run(init_op)
@@ -210,26 +175,30 @@ def model_test():
                 input_img = np.expand_dims(input_img, 0)
                 grid_size = np.array([FLAGS.split_row, FLAGS.split_col], np.float32)
 
-                boxes, scores = sess.run([detection_boxes, detection_scores],
-                                {img_tensor: input_img, grid_size_tensor: grid_size})
+                if FLAGS.add_hough:
+                    input_boxes = hough_cir_detection(img)
+                    feed_dict = {img_tensor: input_img, 
+                                grid_size_tensor: grid_size,
+                                input_boxes_tensor: input_boxes}
+                else:
+                    feed_dict = {img_tensor: input_img, 
+                                grid_size_tensor: grid_size}
+                boxes, scores, abn_indices = sess.run([result_boxes, result_scores, abnormal_indices],
+                                        feed_dict)
+                boxes, scores = abnormal_filter(boxes, scores, abn_indices)
                 boxes = np.multiply(boxes, _ratio_to_value)
                 boxes = boxes.astype(np.int32)
                 print('time: %s' % (time()-start_time))
 
                 drawed_img = draw_bbox(color_img, boxes, scores)
-                if FLAGS.add_hough:
-                    hough_boxes, hough_scores = hough_cir(img, 50, 35)
-                    drawed_img = draw_bbox(
-                        drawed_img, hough_boxes, hough_scores, color=(0, 0, 255))
                 cv2.imwrite(FLAGS.imwrite_dir + str(img_name) +
                             '_result.jpg', drawed_img)
         print('FINISHED TESTING.')
 
 
 def main(unused_arg):
-    convert_cpkt_to_pb()
-    test_model()
-    #model_test()
+    build_model()
+    model_test()
 
 
 if __name__ == '__main__':
