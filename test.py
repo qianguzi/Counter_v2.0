@@ -35,7 +35,7 @@ tf.app.flags.DEFINE_bool('inplace_batchnorm_update', False,
 tf.app.flags.DEFINE_bool('is_training', False, 'train or eval')
 tf.app.flags.DEFINE_bool('add_hough', True, 'Add hough circle detection')
 tf.app.flags.DEFINE_integer('max_output_size', 70, 'Max_output_size')
-tf.app.flags.DEFINE_float('iou_threshold', 0.04, 'iou_threshold')
+tf.app.flags.DEFINE_float('iou_threshold', 0.05, 'iou_threshold')
 tf.app.flags.DEFINE_float('score_threshold', 0.7, 'score_threshold')
 
 FLAGS = tf.app.flags.FLAGS
@@ -136,7 +136,9 @@ def build_model(apply_or_model=False, apply_and_model=False):
         
         output_node_names = ['Non_max_suppression/result_boxes',
                          'Non_max_suppression/result_scores',
-                         'Non_max_suppression/abnormal_indices']
+                         'Non_max_suppression/abnormal_indices',
+                         'Non_max_suppression/abnormal_inter_idx',
+                         'Non_max_suppression/abnormal_inter']
         init_op = tf.global_variables_initializer()
         with tf.Session() as sess:
             sess.run(init_op)
@@ -155,12 +157,15 @@ def model_test():
     with tf.gfile.FastGFile(FLAGS.checkpoint_dir+'model.ckpt-150000.pb', 'rb') as f:
         od_graph_def.ParseFromString(f.read())
         img_tensor, grid_size_tensor, input_boxes_tensor, \
-            result_boxes, result_scores, abnormal_indices= tf.import_graph_def(
+            result_boxes, result_scores, abnormal_indices, \
+            abnormal_inter_idx, abnormal_inter= tf.import_graph_def(
                 od_graph_def,
                 return_elements=['input_img:0', 'input_grid_size:0', 'input_boxes:0', \
                                 'Non_max_suppression/result_boxes:0', \
                                 'Non_max_suppression/result_scores:0', \
-                                'Non_max_suppression/abnormal_indices:0'])
+                                'Non_max_suppression/abnormal_indices:0', \
+                                'Non_max_suppression/abnormal_inter_idx:0', \
+                                'Non_max_suppression/abnormal_inter:0'])
     init_op = tf.global_variables_initializer()
     with tf.Session() as sess:
         sess.run(init_op)
@@ -183,8 +188,15 @@ def model_test():
                 else:
                     feed_dict = {img_tensor: input_img, 
                                 grid_size_tensor: grid_size}
-                boxes, scores, abn_indices = sess.run([result_boxes, result_scores, abnormal_indices],
-                                        feed_dict)
+                boxes, scores, abn_indices, abn_inter_idx, abn_inter = sess.run(
+                    [result_boxes, result_scores, abnormal_indices, abnormal_inter_idx, abnormal_inter], feed_dict)
+                if abn_inter_idx.shape[0] > 0:
+                    for idx in abn_inter_idx:
+                        inter_idx = np.where(abn_inter[idx]==1)[0]
+                        if (np.min(scores[inter_idx])-scores[idx]) > 0.1:
+                            boxes = np.delete(boxes, idx, 0)
+                            scores = np.delete(scores, idx, 0)
+
                 boxes, scores = abnormal_filter(boxes, scores, abn_indices)
                 boxes = np.multiply(boxes, _ratio_to_value)
                 boxes = boxes.astype(np.int32)

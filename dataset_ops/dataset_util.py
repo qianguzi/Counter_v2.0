@@ -77,7 +77,7 @@ def img_grid_split(img, row, col, split_img_size):
     x = np.arange(half_split_img_size, w-half_split_img_size, dx, np.int32)
     y = np.append(y, h-half_split_img_size)
     x = np.append(x, w-half_split_img_size)
-    centers = np.meshgrid(x, y)
+    centers = np.meshgrid(x[:col], y[:row])
     centers = np.stack(centers, axis=2)
     centers = np.reshape(centers, [-1, 2])
     clip_select = np.concatenate((centers - half_split_img_size, centers + half_split_img_size), 1)

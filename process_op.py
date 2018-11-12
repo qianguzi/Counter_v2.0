@@ -2,7 +2,7 @@ import tensorflow as tf
 from tensorflow.contrib.framework import argsort
 
 from detection_ops.utils import shape_utils
-from detection_ops import box_coder
+from detection_ops import box_coder, target_assigner
 
 def postprocess(anchors, box_encodings,
                 class_predictions_with_background,
@@ -61,13 +61,25 @@ def non_max_suppression(detection_boxes,
         result_boxes = tf.gather(detection_boxes, selected_indices, name='result_boxes')
         result_scores = tf.gather(detection_scores, selected_indices, name='result_scores')
 
+        abnormal_inter = target_assigner.iou(result_boxes, result_boxes)
+        abnormal_inter = tf.where((abnormal_inter>0)&(abnormal_inter<1), 
+                                    tf.ones_like(abnormal_inter), 
+                                    tf.zeros_like(abnormal_inter),
+                                    name='abnormal_inter')
+        num_inter = tf.reduce_sum(abnormal_inter, 0)
+        abnormal_inter_idx = tf.where(num_inter>=2)
+        abnormal_inter_idx = tf.reshape(abnormal_inter_idx, [-1])
+        abnormal_inter_idx = tf.cast(abnormal_inter_idx, tf.int32, name='abnormal_inter_idx')
+
         abnormal_indices = argsort(result_boxes[:,:2], axis=0)
         abnormal_indices = tf.concat([abnormal_indices[:2], abnormal_indices[-2:]], 0, name='abnormal_indices')
 
         result_dict = {
             'result_boxes': result_boxes,
             'result_scores': result_scores,
-            'abnormal_indices': abnormal_indices
+            'abnormal_indices': abnormal_indices,
+            'abnormal_inter_idx': abnormal_inter_idx,
+            'abnormal_inter': abnormal_inter
         }
         return result_dict
 
