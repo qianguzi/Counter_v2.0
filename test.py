@@ -74,6 +74,11 @@ _anchors_figure = {
 
 
 def build_model(apply_or_model=False, apply_and_model=False):
+    """Build test model and write model as pb file. 
+    
+    Args:
+        apply_or_model, apply_and_model: whether to apply or/and model.
+    """
     g = tf.Graph()
     with g.as_default(), tf.device(
             tf.train.replica_device_setter(FLAGS.ps_tasks)):

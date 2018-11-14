@@ -1,12 +1,12 @@
 import tensorflow as tf
 
 def read_tfrecord(file_path, shuffle=True):
-    # 创建一个reader来读取TFRecord文件中的样例
+    """read tfrecord files and convert to tensors queue."""
     reader = tf.TFRecordReader()
-    # 创建一个队列来维护输入文件列表
+
     filename_queue = tf.train.string_input_producer(
         [file_path], shuffle=shuffle)
-    # 从文件中读出一个样例，也可以使用read_up_to一次读取多个样例
+
     _, serialized_example = reader.read(filename_queue)
 
     features = tf.parse_single_example(
@@ -15,7 +15,7 @@ def read_tfrecord(file_path, shuffle=True):
                   'bbox_raw': tf.FixedLenFeature([], tf.string),
                   'bbox_num': tf.FixedLenFeature([], tf.int64),
                   'image_name': tf.FixedLenFeature([], tf.string)})
-    # 将字符串解析成图像对应的像素数组
+
     img = tf.decode_raw(features['image_raw'], tf.uint8)
     img = tf.reshape(img, [256, 256, 3])
 
@@ -29,7 +29,18 @@ def read_tfrecord(file_path, shuffle=True):
 
 
 def get_batch(file_path, batch_size, shuffle=True):
-    '''Get batch.'''
+    """Get batch.
+    
+    Args:
+        flie_path: the path to the tfrecord file.
+        batch_size: an integer. Batch size.
+        shuffle: whether to shuffle the input dataset.
+    Returns:
+        img_batch: a batch of image data. 
+        bbox_batch: a batch of object boundingboxes.  
+        num_batch: a batch of object numbers.
+        name_batch: a bacth of image names.
+    """
 
     img, bbox, num, name = read_tfrecord(file_path, shuffle)
     capacity = 5 * batch_size

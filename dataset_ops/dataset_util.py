@@ -15,6 +15,7 @@ def mkdir(path):
 
 
 def area(box):
+    """Return area of the given boundingbox"""
     if (box[2] - box[0]) <= 0 or (box[3] - box[1]) <= 0:
         return 0
     else:
@@ -22,8 +23,14 @@ def area(box):
 
 
 def insection(box_small, box_big):
-    """
-    Return: 比例， 坐标
+    """Get the insection of object boundingbox and crop boundingbox.
+
+    Args:
+        box_small: object boundingbox.
+        box_big: crop boundingbox.
+    Returns: 
+        prop: the area of insection accounted for the proportion of object boundingbox.
+        box: the insection of object boundingbox and crop boundingbox.
     """
     min_cor = np.maximum(box_small[:2], box_big[:2]) - box_big[:2]
     max_cor = np.minimum(box_small[2:], box_big[2:]) - box_big[:2]
@@ -33,14 +40,14 @@ def insection(box_small, box_big):
 
 
 def img_random_split(img, select_num, half_split_img_size):
-    """随机裁取图片.
+    """Random cropping.
 
     Args:
-        img: 被裁剪的原始图片.
-        select_num: 需要裁取的图片数量.
-        half_split_img_size： 需要裁取的图片尺寸的一半.
+        img: the original image to be cropped.
+        select_num: the number of cropped images.
+        half_split_img_size: half of the crop size
     Return:
-        split_imgs, clip_select: 裁取的图片以及其对应于原图的Bbox.
+        split_imgs, clip_select: the cropped image and its corresponding boundingbox.
     """
     h, w = img.shape[:2]
     x = np.arange(half_split_img_size, w - half_split_img_size)
@@ -60,14 +67,14 @@ def img_random_split(img, select_num, half_split_img_size):
     return split_imgs, clip_select
 
 def img_grid_split(img, row, col, split_img_size):
-    """网格裁取图片.
+    """Grid cropping.
 
     Args:
-        img: 被裁剪的原始图片.
-        row, col: 网格的行数和列数.
-        half_split_img_size： 需要裁取的图片尺寸.
+        img: the original image to be cropped.
+        row, col: the number of rows and columns of the grid.
+        split_img_size: crop size.
     Return:
-        split_imgs, clip_select: 裁取的图片以及其对应于原图的Bbox.
+        split_imgs, clip_select: the cropped image and its corresponding boundingbox.
     """
     h, w = img.shape[:2]
     half_split_img_size = int(split_img_size / 2)
@@ -90,6 +97,7 @@ def img_grid_split(img, row, col, split_img_size):
 
 
 def draw_bbox(img, bboxes):
+    """Draw boundingbox on the given image."""
     if img.ndim != 3:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
     for box_name, bbox in bboxes.items():

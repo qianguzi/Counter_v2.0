@@ -1,3 +1,4 @@
+"""Dataset augmentation."""
 import os, cv2
 import codecs, json, argparse
 import numpy as np

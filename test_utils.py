@@ -6,7 +6,6 @@ import tensorflow.contrib.slim as slim
 
 def get_checkpoint_init_fn(fine_tune_checkpoint, include_var=None, exclude_var=None):
     """Returns the checkpoint init_fn if the checkpoint is provided."""
-
     variables_to_restore = slim.get_variables_to_restore(include_var, exclude_var)
     slim_init_fn = slim.assign_from_checkpoint_fn(
         fine_tune_checkpoint,
@@ -19,6 +18,19 @@ def get_checkpoint_init_fn(fine_tune_checkpoint, include_var=None, exclude_var=N
 
 
 def read_pb_model(pb_path, graph_def, return_elements):
+    """Read pb file to get input/output tensors.
+    
+    Args:
+        pb_path: the path of pb file.
+        graph_def: a `GraphDef` proto containing operations to be imported into
+        the default graph.
+        return_elemments: a list of strings containing operation names in
+        `graph_def` that will be returned as `Operation` objects; and/or
+        tensor names in `graph_def` that will be returned as `Tensor` objects.
+    Returns:
+        A list of `Operation` and/or `Tensor` objects from the imported graph,
+    corresponding to the names in `return_elements`.
+    """
     with tf.gfile.FastGFile(pb_path, 'rb') as f:
         graph_def.ParseFromString(f.read())
         return_tensors = tf.import_graph_def(graph_def, return_elements=return_elements)
@@ -26,6 +38,7 @@ def read_pb_model(pb_path, graph_def, return_elements):
 
 
 def write_pb_model(pb_path, sess, graph_def, output_node_names):
+    """Write model as pb file."""
     output_graph_def = tf.graph_util.convert_variables_to_constants(
         sess, graph_def, output_node_names)
     with tf.gfile.GFile(pb_path, "wb") as f:
@@ -33,6 +46,7 @@ def write_pb_model(pb_path, sess, graph_def, output_node_names):
 
 
 def load(sess, saver, checkpoint_dir):
+    """Load model variable from checkpoint file."""
     ckpt = tf.train.get_checkpoint_state(checkpoint_dir)
     if ckpt and ckpt.model_checkpoint_path:
         ckpt_name = os.path.basename(ckpt.model_checkpoint_path)
@@ -45,6 +59,7 @@ def load(sess, saver, checkpoint_dir):
 
 def hough_cir_detection(img, minDist=55, precise=35, minRadius=10, maxRadius=30, 
                         custom_radius=28.0, apply_custom_radius=True):
+    """Hough circle detecction."""
     equ_img = cv2.equalizeHist(img)
     gau_img = cv2.GaussianBlur(equ_img, (5, 5), 0)
     lap_img = cv2.Laplacian(gau_img, -1, ksize=5)
@@ -63,6 +78,7 @@ def hough_cir_detection(img, minDist=55, precise=35, minRadius=10, maxRadius=30,
 
 
 def abnormal_filter(boxes, scores, abnormal_indices):
+    """Filter out the boundingboxes that are misdetected by the edge."""
     abnormal=[]
     center0 = (boxes[abnormal_indices[0,0], 2]-boxes[abnormal_indices[0,0], 0])/2 + boxes[abnormal_indices[0,0], 0]
     center1 = (boxes[abnormal_indices[0,1], 3]-boxes[abnormal_indices[0,1], 1])/2 + boxes[abnormal_indices[0,1], 1]
@@ -85,6 +101,7 @@ def abnormal_filter(boxes, scores, abnormal_indices):
 
 
 def draw_bbox(img, boxes, scores, color=(0, 255, 0)):
+    """Draw boundingboxes on the given image."""
     h, w = img.shape[:2]
     for box, score in zip(boxes, scores):
         min_x = max(0, box[0])

@@ -66,10 +66,12 @@ def iou(boxlist1, boxlist2, scope=None):
         tf.zeros_like(intersections), tf.truediv(intersections, unions))
 
 
-def assign(gt_boxes, anchors,
+def assign(gt_boxes,
+           anchors,
            matcher,
            gt_labels=None,
            gt_weights=None):
+  """Assign target groundtruth boundingbox and class for anchors."""
   num_batch = shape_utils.combined_static_and_dynamic_shape(gt_boxes)
   if gt_labels is None:
     gt_labels = tf.ones([num_batch[0]], dtype=tf.float32)
@@ -220,8 +222,8 @@ def create_classification_weights(match,
         ignored_value=0.,
         unmatched_value=1.0)
 
-def target_assign(bbox_batch, anchors,
-                  matcher):
+def target_assign(bbox_batch, anchors, matcher):
+  """Assign target groundtruth boundingbox and class for anchors.(batch processing)"""
   cls_targets_list = []
   cls_weights_list = []
   reg_targets_list = []

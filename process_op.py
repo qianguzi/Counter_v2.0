@@ -47,10 +47,11 @@ def postprocess(anchors, box_encodings,
 
 
 def non_max_suppression(detection_boxes, 
-                    detection_scores, 
-                    max_output_size=70,
-                    iou_threshold=0.05,
-                    scope=None):
+                        detection_scores, 
+                        max_output_size=70,
+                        iou_threshold=0.05,
+                        scope=None):
+    """"Non max suppression and abnormal filtering."""
     with tf.name_scope(
         scope, 'Non_max_suppression', [max_output_size, iou_threshold]):
         selected_indices = tf.image.non_max_suppression(
@@ -85,6 +86,7 @@ def non_max_suppression(detection_boxes,
 
 
 def crop_and_resize(img_tensor, grid_points, clip_size, scope=None):
+    """Crop and resize."""
     with tf.name_scope(scope, 'Crop_and_resize', [img_tensor, grid_points, clip_size]):
         num_batch = shape_utils.combined_static_and_dynamic_shape(
             grid_points)
@@ -97,6 +99,7 @@ def crop_and_resize(img_tensor, grid_points, clip_size, scope=None):
 def generate_grid(img_shape, grid_size_tensor, 
                   clip_size, value_to_ratio,
                   apply_or_model=False, scope=None):
+    """Generate grid."""
     with tf.name_scope(scope, 'Grid_builder',
                         [img_shape, grid_size_tensor, clip_size, value_to_ratio]):
         h, w = img_shape[1:3]
@@ -124,6 +127,7 @@ def generate_grid(img_shape, grid_size_tensor,
 def preprocess(img_tensor, grid_size_tensor, 
               clip_size, value_to_ratio,
               apply_or_model=False, scope=None):
+    """Original image preprocess."""
     with tf.name_scope(scope, 'Preprocessor',
                         [img_tensor, grid_size_tensor, clip_size, value_to_ratio]):
         img_shape = shape_utils.combined_static_and_dynamic_shape(img_tensor)

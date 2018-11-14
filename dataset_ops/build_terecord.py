@@ -16,7 +16,7 @@ def _bytes_feature(value):
 
 
 def create_tfrecord(file_path, dataset_dir):
-    ''' Covert Image dataset to tfrecord. '''
+    ''' Covert image dataset to tfrecord. '''
     writer = tf.python_io.TFRecordWriter(file_path)
 
     with open(dataset_dir+'name.txt', 'r+') as f:

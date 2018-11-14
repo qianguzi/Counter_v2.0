@@ -6,6 +6,7 @@ import tensorflow as tf
 from dataset_util import *
 
 def build_train_dataset(imread_dir, imwrite_dir=None, save_resultimg=True):
+    """Build crop train dataset for dectection."""
     if imwrite_dir:
         mkdir(imwrite_dir)
         img_dir = imwrite_dir + 'img/'
