@@ -25,10 +25,10 @@
 一些检测结果:
 
 <p align="center">
-<img src="examples/vis1.jpg" width=500></br>
-<img src="examples/vis2.jpg" width=500></br>
-<img src="examples/vis3.jpg" width=500></br>
-<img src="examples/vis4.jpg" width=500></br>
+<img src="examples/vis1.jpg" width=600></br>
+<img src="examples/vis2.jpg" width=600></br>
+<img src="examples/vis3.jpg" width=600></br>
+<img src="examples/vis4.jpg" width=600></br>
 </p>
 
 ## Dataset
@@ -42,7 +42,7 @@
 
 * [original_dataset.zip](https://github.com/qianguzi/Counter_v2.0/releases/download/v2.0/original_datase.zip): 原始图片数据.
 
-##References
+## References
 
 1. **Tensorflow Object Detection API**<br />[[link]](https://github.com/tensorflow/models/tree/master/research/object_detection#tensorflow-object-detection-api). Google.
 
