@@ -100,7 +100,7 @@ def abnormal_filter(boxes, scores, abnormal_indices):
 
 
 
-def draw_bbox(img, boxes, scores, color=(0, 255, 0)):
+def draw_bbox(img, boxes, scores, fontCoeff=(38, 12)):
     """Draw boundingboxes on the given image."""
     h, w = img.shape[:2]
     for box, score in zip(boxes, scores):
@@ -109,7 +109,10 @@ def draw_bbox(img, boxes, scores, color=(0, 255, 0)):
         max_x = min(w, box[2])
         max_y = min(h, box[3])
         cv2.rectangle(img, (min_x, min_y),
-                      (max_x, max_y), color, 2)
-        cv2.putText(img, 'cap:' + str(score)[0:4], (min_x, max_y),
-                    cv2.FONT_HERSHEY_COMPLEX_SMALL, 0.5, color, 1)
+                      (max_x, max_y), (0, 255, 255), 1)
+        cv2.rectangle(img, (min_x, min_y), 
+                      (min_x+fontCoeff[0], min_y+fontCoeff[1]), 
+                      (0, 255, 255), -1)
+        cv2.putText(img, '%0.3f'%(score), (min_x, min_y+int(fontCoeff[1]*0.9)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0))
     return img

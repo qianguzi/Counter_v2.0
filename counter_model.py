@@ -1,7 +1,7 @@
 import sys, cv2
 import numpy as np
 import tensorflow as tf
-import tensorflow.contrib.slim as slim
+from tensorflow.contrib import slim
 from time import time
 
 import test as counter_v2
@@ -83,6 +83,7 @@ def and_model_test():
                 input_img = np.expand_dims(input_img, 0)
                 grid_size = np.array([5.0, 3.0], np.float32)
 
+                input_boxes = hough_cir_detection(img, minDist=30, precise=25, apply_custom_radius=False)
                 feed_dict = {img_tensor: input_img, 
                             grid_size_tensor: grid_size,
                             input_boxes_tensor: input_boxes}
@@ -99,7 +100,7 @@ def and_model_test():
 
 
 def build_or_model():
-    g, img_tensor, cls_boxes, detection_boxes, detection_scores, _ = counter_v2.build_model(apply_or_model=True)
+    g, img_tensor, cls_boxes, detection_boxes, detection_scores = counter_v2.build_model(apply_or_model=True)
     with g.as_default():
         clip_boxes = tf.stack([cls_boxes[:, 1], cls_boxes[:, 0], \
                             cls_boxes[:, 3], cls_boxes[:, 2]], 1)
@@ -167,10 +168,10 @@ def or_model_test():
 
                 input_boxes = hough_cir_detection(img, minDist=30, precise=25, apply_custom_radius=False)
                 feed_dict = {img_tensor: input_img,  
-                                grid_size_tensor: grid_size,
-                                input_boxes_tensor: input_boxes}
-                boxes, scores, abn_indices = sess.run([result_boxes, result_scores, abnormal_indices],
-                                        feed_dict)
+                             grid_size_tensor: grid_size,
+                             input_boxes_tensor: input_boxes}
+                boxes, scores, abn_indices = sess.run(
+                    [result_boxes, result_scores, abnormal_indices], feed_dict)
                 boxes, scores = abnormal_filter(boxes, scores, abn_indices)
                 boxes = np.multiply(boxes, [600,800,600,800])
                 boxes = boxes.astype(np.int32)

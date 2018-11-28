@@ -24,9 +24,9 @@ tf.app.flags.DEFINE_float('depth_multiplier', 0.75,
                           'Depth multiplier for mobilenet')
 tf.app.flags.DEFINE_string('checkpoint_dir', '../checkpoints/counter_v2/',
                            'Directory for writing training checkpoints and logs')
-tf.app.flags.DEFINE_string('dataset_dir', '../dataset/',
+tf.app.flags.DEFINE_string('dataset_dir', './examples/',
                            'Location of dataset')
-tf.app.flags.DEFINE_string('imwrite_dir', '../dataset/result/',
+tf.app.flags.DEFINE_string('imwrite_dir', './examples/result/',
                            'Location of result_imgs')
 tf.app.flags.DEFINE_bool('freeze_batchnorm', False,
                          'Whether to freeze batch norm parameters during training or not')
@@ -214,7 +214,7 @@ def model_test():
 
 
 def main(unused_arg):
-    build_model()
+    #build_model()
     model_test()
 
 
